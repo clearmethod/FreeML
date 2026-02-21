@@ -1073,6 +1073,30 @@ void SumRows(MatrixBase<T>* _out, MatrixBase<T>* _in)
     }
 }
 
+template<class T>
+void SumSpatialDimension(MatrixBase<T>* _out,
+                         MatrixBase<T>* _in,
+                         uint32_t _zLayer,
+                         const Dims3D& _outCoord)
+{
+    assert(_out);
+    assert(_in);
+    assert(_zLayer < _in->GetDimsZ());
+    assert(_outCoord.x < _out->GetDimsX());
+    assert(_outCoord.y < _out->GetDimsY());
+    assert(_outCoord.z < _out->GetDimsZ());
+
+    const uint32_t spatialCount = _in->GetDimsX() * _in->GetDimsY();
+    const T* inPtr = _in->DataRead();
+    const uint32_t offset = _zLayer * spatialCount;
+    T sum = T(0);
+    for (uint32_t i = 0; i < spatialCount; ++i)
+    {
+        sum += inPtr[offset + i];
+    }
+    _out->SetValue(_outCoord.x, _outCoord.y, _outCoord.z, sum);
+}
+
 template< class T>
 T Maximum(MatrixBase<T>* _in)
 {
@@ -1165,6 +1189,116 @@ void HConcat(MatrixBase<T>* _out, MatrixBase<T>* _L, MatrixBase<T>* _R )
         const uint32_t outOffset = row * outCols;
         memcpy(outPtr + outOffset, lPtr + lOffset, bytesL);
         memcpy(outPtr + outOffset + colsL, rPtr + rOffset, bytesR);
+    }
+}
+
+template<class T>
+void Conv2DSingleChannel(MatrixBase<T>* output,
+                         MatrixBase<T>* input,
+                         MatrixBase<T>* kernelWeights,
+                         MatrixBase<T>* bias,
+                         uint32_t outputChannel,
+                         uint32_t stride,
+                         uint32_t dilation,
+                         uint32_t padding)
+{
+    assert(output);
+    assert(input);
+    assert(kernelWeights);
+    assert(outputChannel < output->GetDimsZ());
+
+    // Loop Kernel over the input and write to output.
+    for(uint32_t y = 0; y < output->GetDimsY(); y++)
+    {
+        for(uint32_t x = 0; x < output->GetDimsX(); x++)
+        {
+            // Loop over kernel
+            T sum = T(0);
+            for(uint32_t kz = 0; kz < kernelWeights->GetDimsZ(); kz++)
+            {
+                for(uint32_t ky = 0; ky < kernelWeights->GetDimsY(); ky++)
+                {
+                    for(uint32_t kx = 0; kx < kernelWeights->GetDimsX(); kx++)
+                    {
+                        // Handle Stride and dilation.
+                        const int32_t inX = static_cast<int32_t>(x * stride + kx * dilation)
+                                            - static_cast<int32_t>(padding);
+                        const int32_t inY = static_cast<int32_t>(y * stride + ky * dilation)
+                                            - static_cast<int32_t>(padding);
+                        // Handing padding. If we are outsize of the range - assuming 0 added.
+                        if (inX >= 0 && inY >= 0
+                            && inX < static_cast<int32_t>(input->GetDimsX())
+                            && inY < static_cast<int32_t>(input->GetDimsY()))
+                        {
+                            sum += kernelWeights->GetValue(kx, ky, kz)
+                                * input->GetValue(static_cast<uint32_t>(inX),
+                                                    static_cast<uint32_t>(inY),
+                                                    kz);
+                        }
+                    }
+                }
+            }
+
+            if(bias) sum += bias->GetValue(outputChannel, 0);
+            output->SetValue(x, y, outputChannel, sum);
+        }
+    }
+}
+
+template<class T>
+void Conv2DSingleChannelBackwards(MatrixBase<T>* errorIn,
+                                  MatrixBase<T>* input,
+                                  MatrixBase<T>* kernel,
+                                  MatrixBase<T>* wUpdate,
+                                  MatrixBase<T>* errorOut,
+                                  uint32_t outputChannel,
+                                  uint32_t stride,
+                                  uint32_t dilation,
+                                  uint32_t padding)
+{
+    assert(errorIn);
+    assert(input);
+    assert(kernel);
+    assert(outputChannel < errorIn->GetDimsZ());
+    assert(kernel->GetDimsZ() == input->GetDimsZ());
+
+    const uint32_t inChannels = kernel->GetDimsZ();
+
+    // Calculate Weight and Input Gradients
+    for(uint32_t y = 0; y < errorIn->GetDimsY(); ++y)
+    {
+        for(uint32_t x = 0; x < errorIn->GetDimsX(); ++x)
+        {
+            T grad = errorIn->GetValue(x, y, outputChannel);
+            
+            for(uint32_t kz = 0; kz < inChannels; ++kz)
+            {
+                for(uint32_t ky = 0; ky < kernel->GetDimsY(); ++ky)
+                {
+                    for(uint32_t kx = 0; kx < kernel->GetDimsX(); ++kx)
+                    {
+                        int32_t inX = x * stride + kx * dilation - padding;
+                        int32_t inY = y * stride + ky * dilation - padding;
+
+                        if(inX >= 0 && inY >= 0 && inX < (int32_t)input->GetDimsX() && inY < (int32_t)input->GetDimsY())
+                        {
+                            if(wUpdate)
+                            {
+                                T val = wUpdate->GetValue(kx, ky, kz);
+                                val += input->GetValue(static_cast<uint32_t>(inX), static_cast<uint32_t>(inY), kz) * grad;
+                                wUpdate->SetValue(kx, ky, kz, val);
+                            }
+                            if(errorOut)
+                            {
+                                T val = errorOut->GetValue(static_cast<uint32_t>(inX), static_cast<uint32_t>(inY), kz);
+                                val += kernel->GetValue(kx, ky, kz) * grad;
+                                errorOut->SetValue(static_cast<uint32_t>(inX), static_cast<uint32_t>(inY), kz, val);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

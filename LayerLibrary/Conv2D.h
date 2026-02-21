@@ -6,7 +6,6 @@
 #include "../MatrixLibrary/MatrixBase_Functions.h"
 #include <MatrixLibrary/GPU/DirectX11/MatrixDX11_Functions.h>
 
-
 #include "../ToolsLibrary/Tools.h"
 
 #include <cmath>
@@ -16,16 +15,16 @@
 #include "Datablob.h"
 
 template<class T, class Mat = MatrixCPU<T>>
-Datablob<T, Mat>* InitConv2DBlob(  uint32_t       _inChannels,
-                                uint32_t       _outChannels,
-                                Dims3D         _kernelSize,
-                                uint32_t       _batchSize       = 1,
-                                uint32_t       _stride          = 1,
-                                uint32_t       _padding         = 0,
-                                uint32_t       _dilation        = 1,
-                                bool           _initForTraining = true,
-                                bool           _random          = true,
-                                bool           _useBias         = true)
+Datablob<T, Mat>* InitConv2DBlob(   uint32_t       _inChannels,
+                                    uint32_t       _outChannels,
+                                    Dims3D         _kernelSize,
+                                    uint32_t       _batchSize       = 1,
+                                    uint32_t       _stride          = 1,
+                                    uint32_t       _padding         = 0,
+                                    uint32_t       _dilation        = 1,
+                                    bool           _initForTraining = true,
+                                    bool           _random          = true,
+                                    bool           _useBias         = true)
 {
     Datablob<T, Mat>* blob = new Datablob<T, Mat>();
     MatrixManager<T, Mat>& inst = MatrixManager<T, Mat>::Instance();
@@ -160,8 +159,6 @@ class Conv2D : public Layer<T, Mat>
         uint32_t kW = _blob->GetUInt("KernelSizeX");
         uint32_t kH = _blob->GetUInt("KernelSizeY");
 
-        assert(_input);
-
         uint32_t stride      = _blob->GetUInt("Stride");
         uint32_t dilation    = _blob->GetUInt("Dilation");
         uint32_t padding     = _blob->GetUInt("Padding");
@@ -190,81 +187,40 @@ class Conv2D : public Layer<T, Mat>
         Mat* output = outputRef.get();
         typename MatrixManager<T, Mat>::MatrixRef biasRef = _blob->AcquireMatrix("Bias");
         Mat* bias = biasRef.get();
-        assert(output);
-        assert(input);
 
-        uint32_t stride   = _blob->GetUInt("Stride");
-        uint32_t dilation = _blob->GetUInt("Dilation");
-        uint32_t padding  = _blob->GetUInt("Padding");
+        uint32_t stride      = _blob->GetUInt("Stride");
+        uint32_t dilation    = _blob->GetUInt("Dilation");
+        uint32_t padding     = _blob->GetUInt("Padding");
         uint32_t outChannels = _blob->GetUInt("OutChannels");
-        assert(input->GetDimsZ() == _blob->GetUInt("InChannels") && "Input channels must match Kernel channels");
 
         for(uint32_t oc = 0; oc < outChannels; oc++)
         {
             typename MatrixManager<T, Mat>::MatrixRef kernelRef = _blob->AcquireMatrix("KernelWeights_"+std::to_string(oc));
             Mat* kernelWeights = kernelRef.get();
-
-            // Loop Kernel over the input and write to output.
-            for(uint32_t y = 0; y < output->GetDimsY(); y++)
-            {
-                for(uint32_t x = 0; x < output->GetDimsX(); x++)
-                {
-                    // Loop over kernel
-                    T sum = T(0);
-                    for(uint32_t kz = 0; kz < kernelWeights->GetDimsZ(); kz++)
-                    {
-                        for(uint32_t ky = 0; ky < kernelWeights->GetDimsY(); ky++)
-                        {
-                            for(uint32_t kx = 0; kx < kernelWeights->GetDimsX(); kx++)
-                            {
-                                // Handle Stride and dilation.
-                                const int32_t inX = static_cast<int32_t>(x * stride + kx * dilation)
-                                                    - static_cast<int32_t>(padding);
-                                const int32_t inY = static_cast<int32_t>(y * stride + ky * dilation)
-                                                    - static_cast<int32_t>(padding);
-                                // Handing padding. If we are outsize of the range - assuming 0 added.
-                                if (inX >= 0 && inY >= 0
-                                    && inX < static_cast<int32_t>(input->GetDimsX())
-                                    && inY < static_cast<int32_t>(input->GetDimsY()))
-                                {
-                                    sum += kernelWeights->GetValue(kx, ky, kz)
-                                        * input->GetValue(static_cast<uint32_t>(inX),
-                                                            static_cast<uint32_t>(inY),
-                                                            kz);
-                                }
-                            }
-                        }
-                    }
-
-                    if(bias) sum += bias->GetValue(oc, 0);
-                    output->SetValue(x,y,oc, sum);
-                }
-            }
+            Conv2DSingleChannel<T>(output, input, kernelWeights, bias, oc, stride, dilation, padding);
         }
     }
 
     void Backwards(Datablob<T, Mat>* _blob) override
     {
         typename MatrixManager<T, Mat>::MatrixRef errorInRef = _blob->AcquireMatrix("ErrorInput_0");
-        Mat* errorIn = errorInRef.get(); // Incoming gradient (dL/dY)
+        Mat* errorIn = errorInRef.get();        // Incoming gradient (dL/dY)
         typename MatrixManager<T, Mat>::MatrixRef inputRef = _blob->AcquireMatrix("Input_0");
-        Mat* input = inputRef.get();      // Input (X)
+        Mat* input = inputRef.get();            // Input (X)
         typename MatrixManager<T, Mat>::MatrixRef errorOutRef = _blob->AcquireMatrix("ErrorOut");
-        Mat* errorOut = errorOutRef.get();    // Outgoing gradient (dL/dX)
+        Mat* errorOut = errorOutRef.get();      // Outgoing gradient (dL/dX)
         typename MatrixManager<T, Mat>::MatrixRef bUpdateRef = _blob->AcquireMatrix("BUpdate");
-        Mat* bUpdate = bUpdateRef.get();     // Bias gradient
-
-        assert(errorIn);
-        assert(input);
+        Mat* bUpdate = bUpdateRef.get();        // Bias gradient
 
         uint32_t stride      = _blob->GetUInt("Stride");
         uint32_t dilation    = _blob->GetUInt("Dilation");
         uint32_t padding     = _blob->GetUInt("Padding");
         uint32_t outChannels = _blob->GetUInt("OutChannels");
-        uint32_t inChannels  = _blob->GetUInt("InChannels");
 
-        if(errorOut) Fill(errorOut, static_cast<T>(0));
-        if(bUpdate)  Fill(bUpdate, static_cast<T>(0));
+        if(errorOut) 
+            Clear(errorOut);
+        if(bUpdate)  
+            Clear(bUpdate);
 
         for(uint32_t oc = 0; oc < outChannels; ++oc)
         {
@@ -272,58 +228,15 @@ class Conv2D : public Layer<T, Mat>
             Mat* wUpdate = wUpdateRef.get();
             typename MatrixManager<T, Mat>::MatrixRef kernelRef = _blob->AcquireMatrix("KernelWeights_" + std::to_string(oc));
             Mat* kernel = kernelRef.get();
-            if(wUpdate) Fill(wUpdate, static_cast<T>(0));
+            if(wUpdate) 
+                Clear(wUpdate);
 
             // Calculate Bias Gradient: Sum errorIn over spatial dims
             if(bUpdate)
             {
-                T sum = static_cast<T>(0);
-                for(uint32_t y = 0; y < errorIn->GetDimsY(); ++y)
-                {
-                    for(uint32_t x = 0; x < errorIn->GetDimsX(); ++x)
-                    {
-                        sum += errorIn->GetValue(x, y, oc);
-                    }
-                }
-                bUpdate->SetValue(oc, 0, sum);
+                SumSpatialDimension(bUpdate, errorIn, oc, Dims3D(oc, 0u, 0u));
             }
-
-            // Calculate Weight and Input Gradients
-            for(uint32_t y = 0; y < errorIn->GetDimsY(); ++y)
-            {
-                for(uint32_t x = 0; x < errorIn->GetDimsX(); ++x)
-                {
-                    T grad = errorIn->GetValue(x, y, oc);
-                    
-                    for(uint32_t kz = 0; kz < inChannels; ++kz)
-                    {
-                        for(uint32_t ky = 0; ky < kernel->GetDimsY(); ++ky)
-                        {
-                            for(uint32_t kx = 0; kx < kernel->GetDimsX(); ++kx)
-                            {
-                                int32_t inX = x * stride + kx * dilation - padding;
-                                int32_t inY = y * stride + ky * dilation - padding;
-
-                                if(inX >= 0 && inY >= 0 && inX < (int32_t)input->GetDimsX() && inY < (int32_t)input->GetDimsY())
-                                {
-                                    if(wUpdate)
-                                    {
-                                        T val = wUpdate->GetValue(kx, ky, kz);
-                                        val += input->GetValue(inX, inY, kz) * grad;
-                                        wUpdate->SetValue(kx, ky, kz, val);
-                                    }
-                                    if(errorOut)
-                                    {
-                                        T val = errorOut->GetValue(inX, inY, kz);
-                                        val += kernel->GetValue(kx, ky, kz) * grad;
-                                        errorOut->SetValue(inX, inY, kz, val);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            Conv2DSingleChannelBackwards<T>(errorIn, input, kernel, wUpdate, errorOut, oc, stride, dilation, padding);
         }
     }
 };
