@@ -28,6 +28,11 @@ using Microsoft::WRL::ComPtr;
 class DirectX11Manager
 {
     public:
+    static bool IsAlive()
+    {
+        return LifetimeState().alive;
+    }
+
     static DirectX11Manager* Instance()
     {
         static DirectX11Manager instance;
@@ -85,6 +90,8 @@ class DirectX11Manager
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/mul_strided_transposeboth.hlsl", "mul_strided_transposeboth");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/add.hlsl", "add");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/add_inplace.hlsl", "add_inplace");
+            LoadComputeShaderFromFile("GPU/DirectX11/Shaders/sub.hlsl", "sub");
+            LoadComputeShaderFromFile("GPU/DirectX11/Shaders/sub_inplace.hlsl", "sub_inplace");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/broadcast_add.hlsl", "broadcast_add");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/scaleadd.hlsl", "scaleadd");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/scaleadd_inplace.hlsl", "scaleadd_inplace");
@@ -96,6 +103,19 @@ class DirectX11Manager
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/scatter_add_row.hlsl", "scatter_add_row");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/split_qkv.hlsl", "split_qkv");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/merge_qkv.hlsl", "merge_qkv");
+            LoadComputeShaderFromFile("GPU/DirectX11/Shaders/sum_spatial_dimension.hlsl", "sum_spatial_dimension");
+            LoadComputeShaderFromFile("GPU/DirectX11/Shaders/conv2d_single_channel.hlsl", "conv2d_single_channel");
+            LoadComputeShaderFromFile("GPU/DirectX11/Shaders/conv2d_single_channel_bias.hlsl", "conv2d_single_channel_bias");
+            LoadComputeShaderFromFile("GPU/DirectX11/Shaders/conv2d_single_channel_backwards_wupdate.hlsl", "conv2d_single_channel_backwards_wupdate");
+            LoadComputeShaderFromFile("GPU/DirectX11/Shaders/conv2d_single_channel_backwards_errorout.hlsl", "conv2d_single_channel_backwards_errorout");
+            LoadComputeShaderFromFile("GPU/DirectX11/Shaders/conv2d_transpose_single_channel.hlsl", "conv2d_transpose_single_channel");
+            LoadComputeShaderFromFile("GPU/DirectX11/Shaders/conv2d_transpose_single_channel_bias.hlsl", "conv2d_transpose_single_channel_bias");
+            LoadComputeShaderFromFile("GPU/DirectX11/Shaders/conv2d_transpose_single_channel_backwards_wupdate.hlsl", "conv2d_transpose_single_channel_backwards_wupdate");
+            LoadComputeShaderFromFile("GPU/DirectX11/Shaders/conv2d_transpose_single_channel_backwards_errorout.hlsl", "conv2d_transpose_single_channel_backwards_errorout");
+            LoadComputeShaderFromFile("GPU/DirectX11/Shaders/relu.hlsl", "relu");
+            LoadComputeShaderFromFile("GPU/DirectX11/Shaders/relu_inplace.hlsl", "relu_inplace");
+            LoadComputeShaderFromFile("GPU/DirectX11/Shaders/relu_derivative.hlsl", "relu_derivative");
+            LoadComputeShaderFromFile("GPU/DirectX11/Shaders/relu_derivative_inplace.hlsl", "relu_derivative_inplace");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/gelu.hlsl", "gelu");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/gelu_inplace.hlsl", "gelu_inplace");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/gelu_derivative.hlsl", "gelu_derivative");
@@ -103,11 +123,15 @@ class DirectX11Manager
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/transpose.hlsl", "transpose");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/scale.hlsl", "scale");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/scale_inplace.hlsl", "scale_inplace");
+            LoadComputeShaderFromFile("GPU/DirectX11/Shaders/scale_scalar.hlsl", "scale_scalar");
+            LoadComputeShaderFromFile("GPU/DirectX11/Shaders/scale_scalar_inplace.hlsl", "scale_scalar_inplace");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/fill.hlsl", "fill");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/softmax.hlsl", "softmax");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/softmax_backwards.hlsl", "softmax_backwards");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/cce_logits_loss.hlsl", "cce_logits_loss");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/cce_logits_grad.hlsl", "cce_logits_grad");
+            LoadComputeShaderFromFile("GPU/DirectX11/Shaders/mse_loss_reduce_rows.hlsl", "mse_loss_reduce_rows");
+            LoadComputeShaderFromFile("GPU/DirectX11/Shaders/reduce_sum_to_scalar.hlsl", "reduce_sum_to_scalar");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/adam_update.hlsl", "adam_update");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/layernorm.hlsl", "layernorm");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/layernorm_nobeta.hlsl", "layernorm_nobeta");
@@ -349,6 +373,11 @@ class DirectX11Manager
 
     bool DeleteBuffer(int32_t handle)
     {
+        if (!IsAlive())
+        {
+            return false;
+        }
+
         auto itBuffer = m_bufferMap.find(handle);
         if (itBuffer == m_bufferMap.end())
         {
@@ -360,8 +389,12 @@ class DirectX11Manager
         m_bufferSRVMap.erase(handle);
         m_bufferUAVMap.erase(handle);
 
-        m_allocatedBytes -= m_bufferSizesMap[handle];
-        m_bufferSizesMap.erase(handle);
+        auto itSize = m_bufferSizesMap.find(handle);
+        if (itSize != m_bufferSizesMap.end())
+        {
+            m_allocatedBytes -= itSize->second;
+            m_bufferSizesMap.erase(itSize);
+        }
 
         return true;
     }
@@ -763,6 +796,29 @@ class DirectX11Manager
         }
         #endif
     }
+
+    private:
+    struct LifetimeFlag
+    {
+        bool alive = true;
+    };
+
+    static LifetimeFlag& LifetimeState()
+    {
+        static LifetimeFlag* state = new LifetimeFlag();
+        return *state;
+    }
+
+    DirectX11Manager() = default;
+    ~DirectX11Manager()
+    {
+        LifetimeState().alive = false;
+        m_init = false;
+        m_context = nullptr;
+        m_device.Reset();
+    }
+
+    public:
 
     ComPtr<ID3D11Device>        m_device;
     ID3D11DeviceContext*        m_context = nullptr;

@@ -58,11 +58,18 @@ class MatrixDX11 : public MatrixBase<T>
 
     virtual void FreeMemory() override
     {
+        if (!DirectX11Manager::IsAlive() || !m_gInstance)
+        {
+            m_dataHandles = {-1, -1};
+            return;
+        }
+
         if (!m_derivedAll)
         {
-            if (!m_derivedCBuffer)
+            if (!m_derivedCBuffer && m_dataHandles.m_bufferHandle >= 0)
                 m_gInstance->DeleteBuffer(m_dataHandles.m_bufferHandle);
-            m_gInstance->ReleaseCachedCBuffer(m_dataHandles.m_cbufferHandle);
+            if (m_dataHandles.m_cbufferHandle >= 0)
+                m_gInstance->ReleaseCachedCBuffer(m_dataHandles.m_cbufferHandle);
             m_dataHandles = {-1, -1};
         }
     }
