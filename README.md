@@ -12,6 +12,8 @@ With this setup, you can see how a model can be constructed, linked and run with
 
 While the library aims for decent performance - its main goal is clarity. As a result, some obvious improvements (particularly with shared matrices) has been avoided.
 
+It is also a side-project to support other work, so no guarantees can be given. Please feel free to submit any issues if something is not correct :)
+
 # Features
 - Model assembly, with saving and loading.
 - Prewritten test layers including Transformers.
