@@ -6,6 +6,7 @@
 #include <LayerLibrary/AddLayer.h>
 #include <LayerLibrary/CausalSelfAttentionLayer.h>
 #include <LayerLibrary/Conv2D.h>
+#include <LayerLibrary/Conv2DTranspose.h>
 #include <LayerLibrary/Dense.h>
 #include <LayerLibrary/DropoutLayer.h>
 #include <LayerLibrary/Embedding.h>
@@ -1077,6 +1078,10 @@ class SaveLoader
         if (typeName == "Conv2D")
         {
             return new Conv2D<T, Identity<T>, Mat>();
+        }
+        if (typeName == "Conv2DTranspose")
+        {
+            return new Conv2DTranspose<T, Identity<T>, Mat>();
         }
         if (typeName == "ActivationLayer")
         {

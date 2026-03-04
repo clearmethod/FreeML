@@ -458,21 +458,6 @@ class TransformerBlockLayer : public Layer<T, Mat>
             return;
         delete _blob;
     }
-    void EnsureDenseBlobSized(Datablob<T, Mat>* _blob, uint32_t _outX, uint32_t _inX, uint32_t _batchSize)
-    {
-        if (!_blob)
-            return;
-        this->EnsureMatrix(_blob, "Output_0"                  , _outX, _batchSize);
-        this->EnsureMatrix(_blob, "Dense_OutputPreActivation" , _outX, _batchSize);
-        if (_blob->GetMatrix("Dense_LinearOut"))
-        {
-            this->EnsureMatrix(_blob, "Dense_LinearOut", _outX, _batchSize);
-            this->EnsureMatrix(_blob, "Dense_Delta"    , _outX, _batchSize);
-            this->EnsureMatrix(_blob, "ErrorOut"       , _inX , _batchSize);
-            this->EnsureMatrix(_blob, "Dense_LastInput", _inX , _batchSize);
-        }
-    }
-
     public:
 
     virtual void GetSublayerPairs(  std::vector<typename Layer<T,Mat>::sublayerinfo>& _out,

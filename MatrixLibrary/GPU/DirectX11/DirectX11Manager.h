@@ -16,6 +16,7 @@
 #include <map>
 #include <string>
 #include <cassert>
+#include <filesystem>
 
 #include <ToolsLibrary/Logger.h>
 
@@ -71,6 +72,7 @@ class DirectX11Manager
 
 
             LOG_INFO() << "Loading Base Shaders.";
+            LOG_INFO() << "Current working dir:" << std::filesystem::current_path();
 
             //Load shaders
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/mul.hlsl", "mul");

@@ -46,50 +46,68 @@ cbuffer MatXHat_Params : register(b3)
     uint xhat_pad2;
 };
 
-RWStructuredBuffer<float> MatOut : register(u0);
+RWStructuredBuffer<float> MatOut  : register(u0);
 RWStructuredBuffer<float> MatXHat : register(u1);
-StructuredBuffer<float> MatIn : register(t1);
-StructuredBuffer<float> MatGamma : register(t2);
+StructuredBuffer<float>   MatIn    : register(t1);
+StructuredBuffer<float>   MatGamma : register(t2);
 
-[numthreads(256, 1, 1)]
-void CSMain(uint3 dispatchThreadId : SV_DispatchThreadID)
+#define GROUP_SIZE 256
+groupshared float gs_buf[GROUP_SIZE];
+
+[numthreads(GROUP_SIZE, 1, 1)]
+void CSMain(uint3 groupId  : SV_GroupID,
+            uint3 threadId : SV_GroupThreadID)
 {
-    uint idx = dispatchThreadId.x;
-    uint out_plane = out_dimx * out_dimy;
-    uint out_count = out_plane * out_dimz;
-    if (idx >= out_count)
+    uint tid = threadId.x;
+    uint row = groupId.x;
+
+    uint rows = out_dimy * out_dimz;
+    if (row >= rows)
         return;
 
-    uint out_x = idx % out_dimx;
-    uint out_y = (idx / out_dimx) % out_dimy;
-    uint out_z = idx / out_plane;
+    uint out_z = row / out_dimy;
+    uint out_y = row - out_z * out_dimy;
+    uint N = in_dimx;
 
-    uint in_plane = in_dimx * in_dimy;
-    uint out_base = out_offset + out_z * out_plane;
+    uint in_plane   = in_dimx   * in_dimy;
+    uint out_plane  = out_dimx  * out_dimy;
     uint xhat_plane = xhat_dimx * xhat_dimy;
-    uint xhat_base = xhat_offset + out_z * xhat_plane;
-    uint in_base = in_offset + out_z * in_plane;
-    uint row_base = in_base + (out_y * in_dimx);
 
-    float mean = 0.0f;
-    for (uint i = 0; i < in_dimx; ++i)
+    uint in_row   = in_offset   + out_z * in_plane   + out_y * in_dimx;
+    uint out_row  = out_offset  + out_z * out_plane  + out_y * out_dimx;
+    uint xhat_row = xhat_offset + out_z * xhat_plane + out_y * xhat_dimx;
+
+    // Pass 1: mean — thread 0 sums sequentially to match CPU float order.
+    if (tid == 0)
     {
-        mean += MatIn[row_base + i];
+        float sum = 0.0f;
+        for (uint i = 0; i < N; i++)
+            sum += MatIn[in_row + i];
+        gs_buf[0] = sum;
     }
-    mean /= (float)in_dimx;
+    GroupMemoryBarrierWithGroupSync();
+    float mean = gs_buf[0] / (float)N;
+    GroupMemoryBarrierWithGroupSync();
 
-    float var = 0.0f;
-    for (uint i = 0; i < in_dimx; ++i)
+    // Pass 2: variance — thread 0 sums sequentially.
+    if (tid == 0)
     {
-        float diff = MatIn[row_base + i] - mean;
-        var += diff * diff;
+        float var = 0.0f;
+        for (uint i = 0; i < N; i++)
+        {
+            float diff = MatIn[in_row + i] - mean;
+            var += diff * diff;
+        }
+        gs_buf[0] = var;
     }
-    var /= (float)in_dimx;
+    GroupMemoryBarrierWithGroupSync();
+    float invStd = rsqrt(gs_buf[0] / (float)N + 1e-5f);
 
-    float invStd = rsqrt(var + 1e-5f);
-    float normalized = (MatIn[row_base + out_x] - mean) * invStd;
-    MatXHat[xhat_base + (out_y * xhat_dimx) + out_x] = normalized;
-
-    float gamma = MatGamma[gamma_offset + out_x];
-    MatOut[out_base + (out_y * out_dimx) + out_x] = normalized * gamma;
+    // Pass 3: write output and xHat.
+    for (uint i = tid; i < N; i += GROUP_SIZE)
+    {
+        float normalized = (MatIn[in_row + i] - mean) * invStd;
+        MatXHat[xhat_row + i] = normalized;
+        MatOut[out_row + i]   = normalized * MatGamma[gamma_offset + i];
+    }
 }

@@ -33,8 +33,9 @@
 #include <Loading/SaveLoader.h>
 
 #define T float
+// Switch to CPU if not on Windows.
 #ifdef _WIN32
-using MatType = MatrixDX11<T>;//MatrixCPU<PRECISION>;// Switch to CPU if not on Windows.
+using MatType = MatrixDX11<T>;//MatrixCPU<PRECISION>;
 #else
 using MatType = MatrixCPU<PRECISION>;//
 #endif
@@ -45,17 +46,17 @@ using MatrixRef = typename MatrixManager<T, MatType>::MatrixRef;
 
 struct NanoLLMConfig
 {
-    uint32_t block_size     = 256u; // max context length (sequence length)
-    uint32_t batch_size     = 1u;   // number of sequences per batch
-    uint32_t n_layer        = 6u;   // number of transformer blocks
-    uint32_t n_head         = 6u;   // number of attention heads per block
-    uint32_t n_embed        = 384u; // embedding/hidden dimension
-    uint32_t iter_count     = 50000u;
-    float    dropout        = 0.0f;
-    float    learning_rate  = 0.0001f;
-    bool     use_bias       = false;
-    uint32_t decodeInterval = 50u;
-    uint32_t save_interval  = 300u;
+    uint32_t block_size      = 256u; // max context length (sequence length)
+    uint32_t batch_size      = 1u;   // number of sequences per batch
+    uint32_t n_layer         = 6u;   // number of transformer blocks
+    uint32_t n_head          = 6u;   // number of attention heads per block
+    uint32_t n_embed         = 384u; // embedding/hidden dimension
+    uint32_t iter_count      = 50000u;
+    float    dropout         = 0.0f;
+    float    learning_rate   = 0.0001f;
+    bool     use_bias        = false;
+    uint32_t decode_Interval = 50u;
+    uint32_t save_interval   = 300u;
 
     #ifdef _DEBUG
     std::string model_name = "NanoLLM_DEBUG";
@@ -452,7 +453,7 @@ static void TrainLoop(Model<T, MatType>*            model,
             }
 
             // Output some example and stats
-            if (i % cfg.decodeInterval == 0)
+            if (i % cfg.decode_Interval == 0)
             {
                 model->PrintTimings();
                 MatType* output = model->GetOutput();

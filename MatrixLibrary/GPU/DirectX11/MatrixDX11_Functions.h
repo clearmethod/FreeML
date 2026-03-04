@@ -884,10 +884,9 @@ void LayerNormOp(MatrixDX11<T>* _out,
     const uint32_t uavCount = hasXHat ? 2u : 1u;
     context->CSSetUnorderedAccessViews(0u, uavCount, uavs, nullptr);
 
-    const uint32_t elementCount = _out->GetElementCount();
-    const uint32_t threadsPerGroup = 256u;
-    const uint32_t groupCount = (elementCount + threadsPerGroup - 1u) / threadsPerGroup;
-    context->Dispatch(groupCount, 1u, 1u);
+    // One group per row: each group of 256 threads cooperatively reduces its row.
+    const uint32_t rowCount = _out->GetDimsY() * _out->GetDimsZ();
+    context->Dispatch(rowCount, 1u, 1u);
 
     ID3D11UnorderedAccessView* nullUAVs[] = { nullptr, nullptr };
     context->CSSetUnorderedAccessViews(0u, uavCount, nullUAVs, nullptr);
@@ -1052,9 +1051,9 @@ void LayerNormBackwardsOp(MatrixDX11<T>* _dX,
     ID3D11Buffer* cbsDX[] = { dXCBuffer, dYCBuffer, inCBuffer, gammaCBuffer };
     context->CSSetConstantBuffers(0u, 4u, cbsDX);
 
-    const uint32_t elementCount = _dX->GetElementCount();
-    const uint32_t groupCountDX = (elementCount + threadsPerGroup - 1u) / threadsPerGroup;
-    context->Dispatch(groupCountDX, 1u, 1u);
+    // One group per row, matching the forward dispatch.
+    const uint32_t rowCountDX = _dX->GetDimsY() * _dX->GetDimsZ();
+    context->Dispatch(rowCountDX, 1u, 1u);
 
     ID3D11UnorderedAccessView* nullUAVsDX[] = { nullptr };
     context->CSSetUnorderedAccessViews(0u, 1u, nullUAVsDX, nullptr);
