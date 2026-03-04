@@ -42,6 +42,7 @@ using diffusion_example::GenerateCheckerboard;
 using diffusion_example::kTimeConditionChannels;
 using diffusion_example::NoiseSchedule;
 using diffusion_example::SampleGaussian;
+using diffusion_example::PrintMatrixToTerminal;
 
 // ---------------------------------------------------------------------------
 // Config
@@ -76,39 +77,6 @@ static void Sample(Model<T, MatType>*         vae,
                    const NoiseSchedule&       sched,
                    MatrixManager<T, MatType>& inst);
 
-// Print a single channel of a matrix to the terminal as greyscale block chars.
-static std::string GreyscaleCharString(float value)
-{
-    const int grey = static_cast<int>(std::max(0.0f, std::min(1.0f, (value + 1.0f) * 0.5f)) * 255.0f);
-    std::stringstream out;
-    //if(value >= 0.0f && value <= 1.f)
-        out << "\033[38;2;" << grey << ";" << grey << ";" << grey << "m";
-    //else if(value < 0.0f)
-    //    out << "\033[38;2;" << 128 << ";" << 128 << ";" << 0 << "m";
-    //else if (value > 1.0f)
-    //    out << "\033[38;2;" << 128 << ";" << 0 << ";" << 128 << "m";
-    out << (char)219;
-    out << "\033[0m";
-    return out.str();
-}
-
-// What is says on the tin.
-static void PrintMatrixToTerminal(MatType* mat, uint32_t channel = 0u)
-{
-    const uint32_t W = mat->GetDimsX();
-    const uint32_t H = mat->GetDimsY();
-    for (uint32_t y = 0; y < H; ++y)
-    {
-        std::string row;
-        for (uint32_t x = 0; x < W; ++x)
-        {
-            row += GreyscaleCharString(mat->GetValue(x, y, channel));
-            row += GreyscaleCharString(mat->GetValue(x, y, channel));
-        }
-        LOG_INFO() << row;
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Model builders
 // ---------------------------------------------------------------------------
@@ -122,30 +90,22 @@ static std::unique_ptr<Model<T, MatType>> BuildOrLoadVAE( const DiffusionConfig&
     {
         // Encoder
         std::vector<ConvSettings> encStages = {
-            {cfg.image_ch, cfg.vae_hidden, Dims3D(3u, 3u, 1u), 2u, 1u, 1u, true}
-        };
-        auto* enc     = new VariationalAutoencoder<T, Relu<T>, MatType>();
+                                                {cfg.image_ch, cfg.vae_hidden, Dims3D(3u, 3u, 1u), 2u, 1u, 1u, true}
+                                              };
+        auto* enc = new VariationalAutoencoder<T, Relu<T>, MatType>();
         enc->SetName("vae_enc");
-        // kl_weight > 0 is required for DDPM sampling to work:
-        // Var(z_T) = alpha_bar_T * Var(z0) + (1 - alpha_bar_T) = 1  only if  Var(z0) = 1.
-        // kl_weight=0 lets mu drift to large values, breaking the z_T ~ N(0,1) inference assumption.
-        // kl_weight=1e-6 gives MSE floor ~6e-5 (≈ zero) while keeping the latent bounded.
         auto* encBlob = InitVariationalAutoencoderBlob<T, MatType, Relu<T>>(encStages, cfg.latent_ch, true, 1e-4f);
         model->AddLayer(enc, encBlob);
 
         // Decoder
         std::vector<ConvTransposeSettings> decStages = {
-            {cfg.latent_ch,  cfg.vae_hidden, Dims3D(3u, 3u, 1u), 2u, 1u, 1u, 1u, true},
-            {cfg.vae_hidden, cfg.image_ch,   Dims3D(3u, 3u, 1u), 1u, 1u, 0u, 1u, true}
-        };
+                                                        {cfg.latent_ch,  cfg.vae_hidden, Dims3D(3u, 3u, 1u), 2u, 1u, 1u, 1u, true},
+                                                        {cfg.vae_hidden, cfg.image_ch,   Dims3D(3u, 3u, 1u), 1u, 1u, 0u, 1u, true}
+                                                       };
         auto* dec     = new VariationalAutoencoder_Decode<T, Identity<T>, MatType>();
         dec->SetName("vae_dec");
         auto* decBlob = InitVariationalAutoencoderDecodeBlob<T, MatType>(decStages, true);
         model->AddLayer(dec, decBlob);
-
-        // Chain: decoder input[0] = encoder output[0] (sampled z via reparameterization).
-        // Backward: dL/dz (from dec) is routed as enc's ErrorInput_0 so the
-        // reparameterization + KL gradients are applied correctly.
         model->AddDependency(dec, 0, enc, 0);
 
         model->SetFinalOutputLayer(dec);
@@ -172,20 +132,19 @@ static std::unique_ptr<Model<T, MatType>> BuildOrLoadDenoiser( const DiffusionCo
     auto model = std::make_unique<Model<T, MatType>>();
     if (!model->Load(cfg.denoiser_name))
     {
-        std::vector<ConvSettings> encStages = {
-            {in_ch,         cfg.latent_ch, Dims3D(3u, 3u, 1u), 1u, 1u, 1u, true, "relu"},
-            {cfg.latent_ch, C * 4,         Dims3D(3u, 3u, 1u), 2u, 1u, 1u, true, "relu"},
-            {C * 4,         C * 8,         Dims3D(3u, 3u, 1u), 2u, 1u, 1u, true, "relu"},
-        };
+        std::vector<ConvSettings> encStages =   {
+                                                 {in_ch,         cfg.latent_ch, Dims3D(3u, 3u, 1u), 1u, 1u, 1u, true, "relu"},
+                                                 {cfg.latent_ch, C * 4,         Dims3D(3u, 3u, 1u), 2u, 1u, 1u, true, "relu"},
+                                                 {C * 4,         C * 8,         Dims3D(3u, 3u, 1u), 2u, 1u, 1u, true, "relu"},
+                                                };
         std::vector<ConvTransposeSettings> decStages = {
-            {C * 8, C * 4,         Dims3D(3u, 3u, 1u), 2u, 1u, 1u, 1u, true, "relu"},
-            {C * 4, cfg.latent_ch, Dims3D(3u, 3u, 1u), 2u, 1u, 1u, 1u, true, "identity"},
-        };
+                                                        {C * 8, C * 4,         Dims3D(3u, 3u, 1u), 2u, 1u, 1u, 1u, true, "relu"},
+                                                        {C * 4, cfg.latent_ch, Dims3D(3u, 3u, 1u), 2u, 1u, 1u, 1u, true, "identity"},
+                                                       };
         auto* unet = new UNet<T, Identity<T>, MatType>();
         unet->SetName("unet");
         auto* blob = InitUNetBlob<T, MatType>(encStages, decStages, true);
         model->AddLayer(unet, blob);
-
 
         model->SetFinalOutputLayer(unet);
         model->SetExpectedInputDims({cfg.latent_size, cfg.latent_size, in_ch});
@@ -284,6 +243,7 @@ static void TrainDenoiser(Model<T, MatType>*         vae,
         return;
     }
 
+    // Seed RNG
     std::mt19937 rng(42u);
     std::uniform_int_distribution<uint32_t> tDist(0u, cfg.T_steps - 1u);
     const uint32_t sampleElems = buf.eps.get()->GetElementCount();
@@ -291,21 +251,21 @@ static void TrainDenoiser(Model<T, MatType>*         vae,
     assert(bankElems >= sampleElems);
     std::uniform_int_distribution<uint32_t> noiseOffsetDist(0u, bankElems - sampleElems);
 
-    // Encode once and keep z0 fixed for all denoiser iterations.
+    // Encode once and keep for all denoiser iterations.
     // Use the sampled latent z (output index 0), which is the same latent
     // representation the decoder was trained to reconstruct from.
     GenerateCheckerboard(buf.image.get(), cfg.checker_tile);
-    vae->Run(buf.image.get(), nullptr);
-    {
-        MatrixRef latentRef = encLayer->GetOutput(encBlob, 0u);   // sampled z
-        if (!latentRef.get())
-        {
-            LOG_ERROR() << "VAE encoder returned null sampled latent.";
-            return;
-        }
-        Copy(buf.latent.get(), latentRef.get());
-    }
 
+    vae->Run(buf.image.get(), nullptr);
+    MatrixRef latentRef = encLayer->GetOutput(encBlob, 0u);   // sampled z
+    if (!latentRef.get())
+    {
+        LOG_ERROR() << "VAE encoder returned null sampled latent.";
+        return;
+    }
+    Copy(buf.latent.get(), latentRef.get());
+
+    // Pregenerate the input noise we are going to use.
     SampleGaussian(buf.noiseBank.get(), rng);
 
     for (uint32_t iter = 0; iter < cfg.den_train_iters; ++iter)
@@ -330,23 +290,24 @@ static void TrainDenoiser(Model<T, MatType>*         vae,
         // Train denoiser to predict the noise eps.
         denoiser->Run(buf.unetIn.get(), epsMat, iter % cfg.log_interval == 0);
 
+        // Log information at a fixed interval
         if (iter % cfg.log_interval == 0)
         {
             denoiser->PrintTimings();
-            LOG_INFO() << "[Denoiser] iter " << iter
-                       << "  loss: " << denoiser->GetLastLoss()
-                       << "  t=" << tIdx;
+            LOG_INFO() << "[Denoiser] iter " << iter << "  loss: " << denoiser->GetLastLoss() << "  t=" << tIdx;
             LOG_INFO() << "Rolling Loss: " << denoiser->GetRollingLoss();
-
             LOG_INFO() << denoiser->GetOutput()->GetString();
         }
 
+        // Sample and save model at a different interval.
         if (iter % cfg.save_interval == 0 && iter > 0u)
         {
             denoiser->Save();
             Sample(vae, denoiser, cfg, sched, inst);
         }
     }
+
+    // Save and sample on exit.
     denoiser->Save();
     Sample(vae, denoiser, cfg, sched, inst);
 }
