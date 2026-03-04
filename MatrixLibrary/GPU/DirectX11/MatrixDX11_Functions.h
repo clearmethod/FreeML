@@ -1,6 +1,7 @@
 #pragma once
 
 #include <MatrixLibrary/MatrixBase_Functions.h>
+#include <MatrixLibrary/MatrixManager.h>
 #include <MatrixLibrary/GPU/DirectX11/MatrixDX11.h>
 #include <MatrixLibrary/GPU/DirectX11/DirectX11Manager.h>
 #include <cstring>
@@ -149,7 +150,25 @@ void CopyRange(MatrixDX11<T>* _out,
 
     if (GPUSyncCalls)
         DirectX11Manager::Instance()->WaitForGPU();
+}
 
+template<class T>
+void ConcatZ(MatrixDX11<T>* _out, MatrixDX11<T>* _A, MatrixDX11<T>* _B)
+{
+    assert(_out);
+    assert(_A);
+    assert(_B);
+    assert(_A->GetDimsX() == _B->GetDimsX());
+    assert(_A->GetDimsY() == _B->GetDimsY());
+    assert(_out->GetDimsX() == _A->GetDimsX());
+    assert(_out->GetDimsY() == _A->GetDimsY());
+    assert(_out->GetDimsZ() == _A->GetDimsZ() + _B->GetDimsZ());
+
+    const uint32_t countA = _A->GetElementCount();
+    const uint32_t countB = _B->GetElementCount();
+
+    CopyRange(_out, _A, 0u, 0u, countA);
+    CopyRange(_out, _B, countA, 0u, countB);
 }
 
 template<class T>
@@ -300,8 +319,8 @@ void ScatterAddRows(MatrixDX11<T>* _out, MatrixDX11<T>* _src, MatrixDX11<T>* _in
     assert(_src->GetDimsZ() == _indices->GetDimsZ());
     assert(_out->GetDimsZ() == 1u || _out->GetDimsZ() == _src->GetDimsZ());
 
-    const uint32_t srcCount = _src->GetElementCount();
-    if (srcCount == 0u)
+    const uint32_t outCount = _out->GetElementCount();
+    if (outCount == 0u)
     {
         return;
     }
@@ -348,7 +367,7 @@ void ScatterAddRows(MatrixDX11<T>* _out, MatrixDX11<T>* _src, MatrixDX11<T>* _in
     context->CSSetConstantBuffers(0u, 3u, cbs);
 
     const uint32_t threadsPerGroup = 256u;
-    const uint32_t groupCount = (srcCount + threadsPerGroup - 1u) / threadsPerGroup;
+    const uint32_t groupCount = (outCount + threadsPerGroup - 1u) / threadsPerGroup;
     context->Dispatch(groupCount, 1u, 1u);
 
     ID3D11UnorderedAccessView* nullUAVs[] = { nullptr };
@@ -661,6 +680,336 @@ void Add(MatrixDX11<T>* _out, MatrixDX11<T>* _L, MatrixDX11<T>* _R)
     context->CSSetUnorderedAccessViews(0u, 1u, nullUAVs, nullptr);
     ID3D11ShaderResourceView* nullSRVs[] = { nullptr, nullptr };
     context->CSSetShaderResources(1u, 2u, nullSRVs);
+    context->CSSetShader(nullptr, nullptr, 0u);
+    DirectX11Manager::Instance()->DumpInfoQueueErrors();
+
+    if (GPUSyncCalls)
+        DirectX11Manager::Instance()->WaitForGPU();
+}
+
+template<class T>
+T MeanSquaredErrorLoss(MatrixDX11<T>* target, MatrixDX11<T>* prediction)
+{
+    assert(target);
+    assert(prediction);
+    assert(target->GetDimsX() == prediction->GetDimsX());
+    assert(target->GetDimsY() == prediction->GetDimsY());
+    assert(target->GetDimsZ() == prediction->GetDimsZ());
+
+    const uint32_t count = target->GetElementCount();
+    if (count == 0u)
+    {
+        return T(0);
+    }
+
+    const uint32_t rows = prediction->GetDimsY() * prediction->GetDimsZ();
+    if (rows == 0u)
+    {
+        return T(0);
+    }
+
+    MatrixManager<T, MatrixDX11<T>>& inst = MatrixManager<T, MatrixDX11<T>>::Instance();
+    MatrixDX11<T>* rowScratch = inst.GetScratch({ 1u, rows, 1u });
+    MatrixDX11<T>* scalarScratch = inst.GetScratch({ 1u, 1u, 1u });
+    if (!rowScratch || !scalarScratch)
+    {
+        return T(0);
+    }
+
+    target->Unmap();
+    prediction->Unmap();
+    rowScratch->Unmap();
+    scalarScratch->Unmap();
+
+    DirectX11Manager* manager = prediction->m_gInstance;
+    ID3D11DeviceContext* context = manager ? manager->GetContext() : nullptr;
+    ID3D11ComputeShader* rowShader = manager ? manager->GetShader("mse_loss_reduce_rows") : nullptr;
+    ID3D11ComputeShader* sumShader = manager ? manager->GetShader("reduce_sum_to_scalar") : nullptr;
+    if (!context || !rowShader || !sumShader)
+    {
+        return T(0);
+    }
+
+    if (!SyncCBuffer(rowScratch) || !SyncCBuffer(scalarScratch) || !SyncCBuffer(target) || !SyncCBuffer(prediction))
+    {
+        return T(0);
+    }
+
+    ID3D11Buffer* rowOutCBuffer = manager->GetCBuffer(rowScratch->m_dataHandles.m_cbufferHandle);
+    ID3D11Buffer* scalarOutCBuffer = manager->GetCBuffer(scalarScratch->m_dataHandles.m_cbufferHandle);
+    ID3D11Buffer* targetCBuffer = manager->GetCBuffer(target->m_dataHandles.m_cbufferHandle);
+    ID3D11Buffer* predictionCBuffer = manager->GetCBuffer(prediction->m_dataHandles.m_cbufferHandle);
+    ID3D11Buffer* rowInCBuffer = manager->GetCBuffer(rowScratch->m_dataHandles.m_cbufferHandle);
+    if (!rowOutCBuffer || !scalarOutCBuffer || !targetCBuffer || !predictionCBuffer || !rowInCBuffer)
+    {
+        return T(0);
+    }
+
+    ID3D11ShaderResourceView* targetSRV = manager->GetBufferSRV(target->m_dataHandles.m_bufferHandle);
+    ID3D11ShaderResourceView* predictionSRV = manager->GetBufferSRV(prediction->m_dataHandles.m_bufferHandle);
+    ID3D11UnorderedAccessView* rowOutUAV = manager->GetBufferUAV(rowScratch->m_dataHandles.m_bufferHandle);
+    if (!targetSRV || !predictionSRV || !rowOutUAV)
+    {
+        return T(0);
+    }
+
+    context->CSSetShader(rowShader, nullptr, 0u);
+    ID3D11ShaderResourceView* rowSRVs[] = { targetSRV, predictionSRV };
+    context->CSSetShaderResources(1u, 2u, rowSRVs);
+    ID3D11UnorderedAccessView* rowUAVs[] = { rowOutUAV };
+    context->CSSetUnorderedAccessViews(0u, 1u, rowUAVs, nullptr);
+    ID3D11Buffer* rowCBs[] = { rowOutCBuffer, targetCBuffer, predictionCBuffer };
+    context->CSSetConstantBuffers(0u, 3u, rowCBs);
+    context->Dispatch(rows, 1u, 1u);
+
+    ID3D11UnorderedAccessView* nullUAVs[] = { nullptr };
+    context->CSSetUnorderedAccessViews(0u, 1u, nullUAVs, nullptr);
+    ID3D11ShaderResourceView* nullRowSRVs[] = { nullptr, nullptr };
+    context->CSSetShaderResources(1u, 2u, nullRowSRVs);
+    context->CSSetShader(nullptr, nullptr, 0u);
+
+    rowScratch->Unmap();
+    scalarScratch->Unmap();
+
+    if (!SyncCBuffer(rowScratch) || !SyncCBuffer(scalarScratch))
+    {
+        return T(0);
+    }
+
+    ID3D11ShaderResourceView* rowScratchSRV = manager->GetBufferSRV(rowScratch->m_dataHandles.m_bufferHandle);
+    ID3D11UnorderedAccessView* scalarUAV = manager->GetBufferUAV(scalarScratch->m_dataHandles.m_bufferHandle);
+    if (!rowScratchSRV || !scalarUAV)
+    {
+        return T(0);
+    }
+
+    context->CSSetShader(sumShader, nullptr, 0u);
+    ID3D11ShaderResourceView* sumSRVs[] = { rowScratchSRV };
+    context->CSSetShaderResources(1u, 1u, sumSRVs);
+    ID3D11UnorderedAccessView* sumUAVs[] = { scalarUAV };
+    context->CSSetUnorderedAccessViews(0u, 1u, sumUAVs, nullptr);
+    ID3D11Buffer* sumCBs[] = { scalarOutCBuffer, rowInCBuffer };
+    context->CSSetConstantBuffers(0u, 2u, sumCBs);
+    context->Dispatch(1u, 1u, 1u);
+
+    context->CSSetUnorderedAccessViews(0u, 1u, nullUAVs, nullptr);
+    ID3D11ShaderResourceView* nullSumSRVs[] = { nullptr };
+    context->CSSetShaderResources(1u, 1u, nullSumSRVs);
+    context->CSSetShader(nullptr, nullptr, 0u);
+    DirectX11Manager::Instance()->DumpInfoQueueErrors();
+
+    const T* scalarPtr = scalarScratch->DataRead();
+    if (!scalarPtr)
+    {
+        return T(0);
+    }
+
+    const T sumSq = scalarPtr[0];
+    scalarScratch->Unmap();
+    rowScratch->Unmap();
+    return sumSq / static_cast<T>(count);
+}
+
+template<class T>
+void Sub(MatrixDX11<T>* _out, MatrixDX11<T>* _L, MatrixDX11<T>* _R)
+{
+    assert(_out);
+    assert(_L);
+    assert(_R);
+    assert(_out->GetElementCount() == _L->GetElementCount());
+    assert(_out->GetElementCount() == _R->GetElementCount());
+    DirectX11Manager::Instance()->DumpInfoQueueErrors();
+
+    _out->Unmap();
+    _L->Unmap();
+    _R->Unmap();
+
+    DirectX11Manager* manager = _out->m_gInstance;
+    ID3D11DeviceContext* context = manager ? manager->GetContext() : nullptr;
+    if (!context)
+    {
+        return;
+    }
+
+    ID3D11Buffer* outBuffer = manager->GetBuffer(_out->m_dataHandles.m_bufferHandle);
+    ID3D11Buffer* leftBuffer = manager->GetBuffer(_L->m_dataHandles.m_bufferHandle);
+    ID3D11Buffer* rightBuffer = manager->GetBuffer(_R->m_dataHandles.m_bufferHandle);
+    if (!outBuffer || !leftBuffer || !rightBuffer)
+    {
+        return;
+    }
+
+    const bool aliasOutLeft = (outBuffer == leftBuffer);
+    const bool aliasOutRight = (outBuffer == rightBuffer);
+    if (aliasOutLeft && aliasOutRight)
+    {
+        Clear(_out);
+        return;
+    }
+
+    const char* shaderName = (aliasOutLeft || aliasOutRight) ? "sub_inplace" : "sub";
+    ID3D11ComputeShader* shader = manager->GetShader(shaderName);
+    if (!shader)
+    {
+        return;
+    }
+
+    if (aliasOutLeft || aliasOutRight)
+    {
+        MatrixDX11<T>* in = aliasOutLeft ? _R : _L;
+        if (!SyncCBuffer(_out) || !SyncCBuffer(in))
+        {
+            return;
+        }
+
+        const uint32_t optionalParams[1] = { aliasOutRight ? 1u : 0u };
+        if (!manager->SetCBufferOptionalParams(_out->m_dataHandles.m_cbufferHandle, optionalParams, 1u))
+        {
+            return;
+        }
+
+        ID3D11Buffer* outCBuffer = manager->GetCBuffer(_out->m_dataHandles.m_cbufferHandle);
+        ID3D11Buffer* inCBuffer = manager->GetCBuffer(in->m_dataHandles.m_cbufferHandle);
+        if (!outCBuffer || !inCBuffer)
+        {
+            return;
+        }
+
+        ID3D11ShaderResourceView* inSRV = manager->GetBufferSRV(in->m_dataHandles.m_bufferHandle);
+        ID3D11UnorderedAccessView* outUAV = manager->GetBufferUAV(_out->m_dataHandles.m_bufferHandle);
+        if (!inSRV || !outUAV)
+        {
+            return;
+        }
+
+        context->CSSetShader(shader, nullptr, 0u);
+        ID3D11ShaderResourceView* srvs[] = { inSRV };
+        context->CSSetShaderResources(1u, 1u, srvs);
+        ID3D11UnorderedAccessView* uavs[] = { outUAV };
+        context->CSSetUnorderedAccessViews(0u, 1u, uavs, nullptr);
+        ID3D11Buffer* cbs[] = { outCBuffer, inCBuffer };
+        context->CSSetConstantBuffers(0u, 2u, cbs);
+
+        const uint32_t elementCount = _out->GetElementCount();
+        const uint32_t threadsPerGroup = 256u;
+        const uint32_t groupCount = (elementCount + threadsPerGroup - 1u) / threadsPerGroup;
+        context->Dispatch(groupCount, 1u, 1u);
+
+        ID3D11UnorderedAccessView* nullUAVs[] = { nullptr };
+        context->CSSetUnorderedAccessViews(0u, 1u, nullUAVs, nullptr);
+        ID3D11ShaderResourceView* nullSRVs[] = { nullptr };
+        context->CSSetShaderResources(1u, 1u, nullSRVs);
+        context->CSSetShader(nullptr, nullptr, 0u);
+        return;
+    }
+
+    if (!SyncCBuffer(_out) || !SyncCBuffer(_L) || !SyncCBuffer(_R))
+    {
+        return;
+    }
+
+    ID3D11Buffer* outCBuffer = manager->GetCBuffer(_out->m_dataHandles.m_cbufferHandle);
+    ID3D11Buffer* leftCBuffer = manager->GetCBuffer(_L->m_dataHandles.m_cbufferHandle);
+    ID3D11Buffer* rightCBuffer = manager->GetCBuffer(_R->m_dataHandles.m_cbufferHandle);
+    if (!outCBuffer || !leftCBuffer || !rightCBuffer)
+    {
+        return;
+    }
+
+    ID3D11ShaderResourceView* leftSRV = manager->GetBufferSRV(_L->m_dataHandles.m_bufferHandle);
+    ID3D11ShaderResourceView* rightSRV = manager->GetBufferSRV(_R->m_dataHandles.m_bufferHandle);
+    ID3D11UnorderedAccessView* outUAV = manager->GetBufferUAV(_out->m_dataHandles.m_bufferHandle);
+    if (!leftSRV || !rightSRV || !outUAV)
+    {
+        return;
+    }
+
+    context->CSSetShader(shader, nullptr, 0u);
+    ID3D11ShaderResourceView* srvs[] = { leftSRV, rightSRV };
+    context->CSSetShaderResources(1u, 2u, srvs);
+    ID3D11UnorderedAccessView* uavs[] = { outUAV };
+    context->CSSetUnorderedAccessViews(0u, 1u, uavs, nullptr);
+    ID3D11Buffer* cbs[] = { outCBuffer, leftCBuffer, rightCBuffer };
+    context->CSSetConstantBuffers(0u, 3u, cbs);
+
+    const uint32_t elementCount = _out->GetElementCount();
+    const uint32_t threadsPerGroup = 256u;
+    const uint32_t groupCount = (elementCount + threadsPerGroup - 1u) / threadsPerGroup;
+    context->Dispatch(groupCount, 1u, 1u);
+
+    ID3D11UnorderedAccessView* nullUAVs[] = { nullptr };
+    context->CSSetUnorderedAccessViews(0u, 1u, nullUAVs, nullptr);
+    ID3D11ShaderResourceView* nullSRVs[] = { nullptr, nullptr };
+    context->CSSetShaderResources(1u, 2u, nullSRVs);
+    context->CSSetShader(nullptr, nullptr, 0u);
+    DirectX11Manager::Instance()->DumpInfoQueueErrors();
+
+    if (GPUSyncCalls)
+        DirectX11Manager::Instance()->WaitForGPU();
+}
+
+template<class T>
+void SumSpatialDimension(MatrixDX11<T>* _out,
+                         MatrixDX11<T>* _in,
+                         uint32_t _zLayer,
+                         const Dims3D& _outCoord)
+{
+    assert(_out);
+    assert(_in);
+    assert(_zLayer < _in->GetDimsZ());
+    assert(_outCoord.x < _out->GetDimsX());
+    assert(_outCoord.y < _out->GetDimsY());
+    assert(_outCoord.z < _out->GetDimsZ());
+
+    _out->Unmap();
+    _in->Unmap();
+
+    DirectX11Manager* manager = _out->m_gInstance;
+    ID3D11DeviceContext* context = manager ? manager->GetContext() : nullptr;
+    ID3D11ComputeShader* shader = manager ? manager->GetShader("sum_spatial_dimension") : nullptr;
+    if (!context || !shader)
+    {
+        return;
+    }
+
+    if (!SyncCBuffer(_out) || !SyncCBuffer(_in))
+    {
+        return;
+    }
+
+    const uint32_t optionalParams[4] = { _zLayer, _outCoord.x, _outCoord.y, _outCoord.z };
+    if (!manager->SetCBufferOptionalParams(_out->m_dataHandles.m_cbufferHandle, optionalParams, 4u))
+    {
+        return;
+    }
+
+    ID3D11Buffer* outCBuffer = manager->GetCBuffer(_out->m_dataHandles.m_cbufferHandle);
+    ID3D11Buffer* inCBuffer = manager->GetCBuffer(_in->m_dataHandles.m_cbufferHandle);
+    if (!outCBuffer || !inCBuffer)
+    {
+        return;
+    }
+
+    ID3D11ShaderResourceView* inSRV = manager->GetBufferSRV(_in->m_dataHandles.m_bufferHandle);
+    ID3D11UnorderedAccessView* outUAV = manager->GetBufferUAV(_out->m_dataHandles.m_bufferHandle);
+    if (!inSRV || !outUAV)
+    {
+        return;
+    }
+
+    context->CSSetShader(shader, nullptr, 0u);
+    ID3D11ShaderResourceView* srvs[] = { inSRV };
+    context->CSSetShaderResources(1u, 1u, srvs);
+    ID3D11UnorderedAccessView* uavs[] = { outUAV };
+    context->CSSetUnorderedAccessViews(0u, 1u, uavs, nullptr);
+    ID3D11Buffer* cbs[] = { outCBuffer, inCBuffer };
+    context->CSSetConstantBuffers(0u, 2u, cbs);
+    context->Dispatch(1u, 1u, 1u);
+
+    ID3D11UnorderedAccessView* nullUAVs[] = { nullptr };
+    context->CSSetUnorderedAccessViews(0u, 1u, nullUAVs, nullptr);
+    ID3D11ShaderResourceView* nullSRVs[] = { nullptr };
+    context->CSSetShaderResources(1u, 1u, nullSRVs);
     context->CSSetShader(nullptr, nullptr, 0u);
     DirectX11Manager::Instance()->DumpInfoQueueErrors();
 
@@ -1354,6 +1703,653 @@ void TransposeMat(MatrixDX11<T>* _out, MatrixDX11<T>* _in)
 }
 
 template<class T>
+void Conv2DSingleChannel(MatrixDX11<T>* output,
+                         MatrixDX11<T>* input,
+                         MatrixDX11<T>* kernelWeights,
+                         MatrixDX11<T>* bias,
+                         uint32_t outputChannel,
+                         uint32_t stride,
+                         uint32_t dilation,
+                         uint32_t padding)
+{
+    assert(output);
+    assert(input);
+    assert(kernelWeights);
+    assert(outputChannel < output->GetDimsZ());
+    DirectX11Manager::Instance()->DumpInfoQueueErrors();
+
+    output->Unmap();
+    input->Unmap();
+    kernelWeights->Unmap();
+    if (bias)
+    {
+        bias->Unmap();
+    }
+
+    DirectX11Manager* manager = output->m_gInstance;
+    ID3D11DeviceContext* context = manager ? manager->GetContext() : nullptr;
+    const char* shaderName = bias ? "conv2d_single_channel_bias" : "conv2d_single_channel";
+    ID3D11ComputeShader* shader = manager ? manager->GetShader(shaderName) : nullptr;
+    if (!context || !shader)
+    {
+        return;
+    }
+
+    if (!SyncCBuffer(output) || !SyncCBuffer(input) || !SyncCBuffer(kernelWeights))
+    {
+        return;
+    }
+    if (bias && !SyncCBuffer(bias))
+    {
+        return;
+    }
+
+    const uint32_t optionalParams[4] = { outputChannel, stride, dilation, padding };
+    if (!manager->SetCBufferOptionalParams(output->m_dataHandles.m_cbufferHandle, optionalParams, 4u))
+    {
+        return;
+    }
+
+    ID3D11Buffer* outCBuffer = manager->GetCBuffer(output->m_dataHandles.m_cbufferHandle);
+    ID3D11Buffer* inCBuffer = manager->GetCBuffer(input->m_dataHandles.m_cbufferHandle);
+    ID3D11Buffer* kernelCBuffer = manager->GetCBuffer(kernelWeights->m_dataHandles.m_cbufferHandle);
+    ID3D11Buffer* biasCBuffer = bias ? manager->GetCBuffer(bias->m_dataHandles.m_cbufferHandle) : nullptr;
+    if (!outCBuffer || !inCBuffer || !kernelCBuffer || (bias && !biasCBuffer))
+    {
+        return;
+    }
+
+    ID3D11ShaderResourceView* inSRV = manager->GetBufferSRV(input->m_dataHandles.m_bufferHandle);
+    ID3D11ShaderResourceView* kernelSRV = manager->GetBufferSRV(kernelWeights->m_dataHandles.m_bufferHandle);
+    ID3D11ShaderResourceView* biasSRV = bias ? manager->GetBufferSRV(bias->m_dataHandles.m_bufferHandle) : nullptr;
+    ID3D11UnorderedAccessView* outUAV = manager->GetBufferUAV(output->m_dataHandles.m_bufferHandle);
+    if (!inSRV || !kernelSRV || !outUAV || (bias && !biasSRV))
+    {
+        return;
+    }
+
+    context->CSSetShader(shader, nullptr, 0u);
+    if (bias)
+    {
+        ID3D11ShaderResourceView* srvs[] = { inSRV, kernelSRV, biasSRV };
+        context->CSSetShaderResources(1u, 3u, srvs);
+        ID3D11Buffer* cbs[] = { outCBuffer, inCBuffer, kernelCBuffer, biasCBuffer };
+        context->CSSetConstantBuffers(0u, 4u, cbs);
+    }
+    else
+    {
+        ID3D11ShaderResourceView* srvs[] = { inSRV, kernelSRV };
+        context->CSSetShaderResources(1u, 2u, srvs);
+        ID3D11Buffer* cbs[] = { outCBuffer, inCBuffer, kernelCBuffer };
+        context->CSSetConstantBuffers(0u, 3u, cbs);
+    }
+
+    ID3D11UnorderedAccessView* uavs[] = { outUAV };
+    context->CSSetUnorderedAccessViews(0u, 1u, uavs, nullptr);
+
+    const uint32_t elementCount = output->GetDimsX() * output->GetDimsY();
+    const uint32_t threadsPerGroup = 256u;
+    const uint32_t groupCount = (elementCount + threadsPerGroup - 1u) / threadsPerGroup;
+    context->Dispatch(groupCount, 1u, 1u);
+
+    ID3D11UnorderedAccessView* nullUAVs[] = { nullptr };
+    context->CSSetUnorderedAccessViews(0u, 1u, nullUAVs, nullptr);
+    if (bias)
+    {
+        ID3D11ShaderResourceView* nullSRVs[] = { nullptr, nullptr, nullptr };
+        context->CSSetShaderResources(1u, 3u, nullSRVs);
+    }
+    else
+    {
+        ID3D11ShaderResourceView* nullSRVs[] = { nullptr, nullptr };
+        context->CSSetShaderResources(1u, 2u, nullSRVs);
+    }
+    context->CSSetShader(nullptr, nullptr, 0u);
+    DirectX11Manager::Instance()->DumpInfoQueueErrors();
+
+    if (GPUSyncCalls)
+        DirectX11Manager::Instance()->WaitForGPU();
+}
+
+template<class T>
+void Conv2DSingleChannelBackwards(MatrixDX11<T>* errorIn,
+                                  MatrixDX11<T>* input,
+                                  MatrixDX11<T>* kernel,
+                                  MatrixDX11<T>* wUpdate,
+                                  MatrixDX11<T>* errorOut,
+                                  uint32_t outputChannel,
+                                  uint32_t stride,
+                                  uint32_t dilation,
+                                  uint32_t padding)
+{
+    assert(errorIn);
+    assert(input);
+    assert(kernel);
+    assert(outputChannel < errorIn->GetDimsZ());
+    assert(kernel->GetDimsZ() == input->GetDimsZ());
+    if (!wUpdate && !errorOut)
+    {
+        return;
+    }
+
+    DirectX11Manager::Instance()->DumpInfoQueueErrors();
+
+    errorIn->Unmap();
+    input->Unmap();
+    kernel->Unmap();
+    if (wUpdate)
+    {
+        wUpdate->Unmap();
+    }
+    if (errorOut)
+    {
+        errorOut->Unmap();
+    }
+
+    DirectX11Manager* manager = errorIn->m_gInstance;
+    ID3D11DeviceContext* context = manager ? manager->GetContext() : nullptr;
+    if (!context)
+    {
+        return;
+    }
+
+    if (!SyncCBuffer(errorIn) || !SyncCBuffer(input) || !SyncCBuffer(kernel))
+    {
+        return;
+    }
+    if (wUpdate && !SyncCBuffer(wUpdate))
+    {
+        return;
+    }
+    if (errorOut && !SyncCBuffer(errorOut))
+    {
+        return;
+    }
+
+    const uint32_t optionalParams[4] = { outputChannel, stride, dilation, padding };
+    if (!manager->SetCBufferOptionalParams(errorIn->m_dataHandles.m_cbufferHandle, optionalParams, 4u))
+    {
+        return;
+    }
+
+    ID3D11Buffer* errorInCBuffer = manager->GetCBuffer(errorIn->m_dataHandles.m_cbufferHandle);
+    ID3D11Buffer* inputCBuffer = manager->GetCBuffer(input->m_dataHandles.m_cbufferHandle);
+    ID3D11Buffer* kernelCBuffer = manager->GetCBuffer(kernel->m_dataHandles.m_cbufferHandle);
+    ID3D11Buffer* wUpdateCBuffer = wUpdate ? manager->GetCBuffer(wUpdate->m_dataHandles.m_cbufferHandle) : nullptr;
+    ID3D11Buffer* errorOutCBuffer = errorOut ? manager->GetCBuffer(errorOut->m_dataHandles.m_cbufferHandle) : nullptr;
+    if (!errorInCBuffer || !inputCBuffer || !kernelCBuffer
+        || (wUpdate && !wUpdateCBuffer)
+        || (errorOut && !errorOutCBuffer))
+    {
+        return;
+    }
+
+    ID3D11ShaderResourceView* errorInSRV = manager->GetBufferSRV(errorIn->m_dataHandles.m_bufferHandle);
+    ID3D11ShaderResourceView* inputSRV = manager->GetBufferSRV(input->m_dataHandles.m_bufferHandle);
+    ID3D11ShaderResourceView* kernelSRV = manager->GetBufferSRV(kernel->m_dataHandles.m_bufferHandle);
+    if (!errorInSRV || !inputSRV || !kernelSRV)
+    {
+        return;
+    }
+
+    if (wUpdate)
+    {
+        ID3D11ComputeShader* shader = manager->GetShader("conv2d_single_channel_backwards_wupdate");
+        ID3D11UnorderedAccessView* wUpdateUAV = manager->GetBufferUAV(wUpdate->m_dataHandles.m_bufferHandle);
+        if (!shader || !wUpdateUAV)
+        {
+            return;
+        }
+
+        context->CSSetShader(shader, nullptr, 0u);
+        ID3D11ShaderResourceView* srvs[] = { errorInSRV, inputSRV, kernelSRV };
+        context->CSSetShaderResources(1u, 3u, srvs);
+        ID3D11UnorderedAccessView* uavs[] = { wUpdateUAV };
+        context->CSSetUnorderedAccessViews(0u, 1u, uavs, nullptr);
+        ID3D11Buffer* cbs[] = { errorInCBuffer, inputCBuffer, kernelCBuffer, wUpdateCBuffer };
+        context->CSSetConstantBuffers(0u, 4u, cbs);
+        const uint32_t elementCount = wUpdate->GetElementCount();
+        const uint32_t threadsPerGroup = 256u;
+        const uint32_t groupCount = (elementCount + threadsPerGroup - 1u) / threadsPerGroup;
+        context->Dispatch(groupCount, 1u, 1u);
+
+        ID3D11UnorderedAccessView* nullUAVs[] = { nullptr };
+        context->CSSetUnorderedAccessViews(0u, 1u, nullUAVs, nullptr);
+        ID3D11ShaderResourceView* nullSRVs[] = { nullptr, nullptr, nullptr };
+        context->CSSetShaderResources(1u, 3u, nullSRVs);
+        context->CSSetShader(nullptr, nullptr, 0u);
+    }
+
+    if (errorOut)
+    {
+        ID3D11ComputeShader* shader = manager->GetShader("conv2d_single_channel_backwards_errorout");
+        ID3D11UnorderedAccessView* errorOutUAV = manager->GetBufferUAV(errorOut->m_dataHandles.m_bufferHandle);
+        if (!shader || !errorOutUAV)
+        {
+            return;
+        }
+
+        context->CSSetShader(shader, nullptr, 0u);
+        ID3D11ShaderResourceView* srvs[] = { errorInSRV, inputSRV, kernelSRV };
+        context->CSSetShaderResources(1u, 3u, srvs);
+        ID3D11UnorderedAccessView* uavs[] = { errorOutUAV };
+        context->CSSetUnorderedAccessViews(0u, 1u, uavs, nullptr);
+        ID3D11Buffer* cbs[] = { errorInCBuffer, inputCBuffer, kernelCBuffer, errorOutCBuffer };
+        context->CSSetConstantBuffers(0u, 4u, cbs);
+        const uint32_t elementCount = errorOut->GetElementCount();
+        const uint32_t threadsPerGroup = 256u;
+        const uint32_t groupCount = (elementCount + threadsPerGroup - 1u) / threadsPerGroup;
+        context->Dispatch(groupCount, 1u, 1u);
+
+        ID3D11UnorderedAccessView* nullUAVs[] = { nullptr };
+        context->CSSetUnorderedAccessViews(0u, 1u, nullUAVs, nullptr);
+        ID3D11ShaderResourceView* nullSRVs[] = { nullptr, nullptr, nullptr };
+        context->CSSetShaderResources(1u, 3u, nullSRVs);
+        context->CSSetShader(nullptr, nullptr, 0u);
+    }
+    DirectX11Manager::Instance()->DumpInfoQueueErrors();
+
+    if (GPUSyncCalls)
+        DirectX11Manager::Instance()->WaitForGPU();
+}
+
+template<class T>
+void Conv2DTransposeSingleChannel(MatrixDX11<T>* output,
+                                  MatrixDX11<T>* input,
+                                  MatrixDX11<T>* kernel,
+                                  MatrixDX11<T>* bias,
+                                  uint32_t outputChannel,
+                                  uint32_t stride,
+                                  uint32_t dilation,
+                                  uint32_t padding)
+{
+    assert(output);
+    assert(input);
+    assert(kernel);
+    assert(outputChannel < output->GetDimsZ());
+    assert(kernel->GetDimsZ() == input->GetDimsZ());
+    DirectX11Manager::Instance()->DumpInfoQueueErrors();
+
+    output->Unmap();
+    input->Unmap();
+    kernel->Unmap();
+    if (bias)
+    {
+        bias->Unmap();
+    }
+
+    DirectX11Manager* manager = output->m_gInstance;
+    ID3D11DeviceContext* context = manager ? manager->GetContext() : nullptr;
+    const char* shaderName = bias ? "conv2d_transpose_single_channel_bias" : "conv2d_transpose_single_channel";
+    ID3D11ComputeShader* shader = manager ? manager->GetShader(shaderName) : nullptr;
+    if (!context || !shader)
+    {
+        return;
+    }
+
+    if (!SyncCBuffer(output) || !SyncCBuffer(input) || !SyncCBuffer(kernel))
+    {
+        return;
+    }
+    if (bias && !SyncCBuffer(bias))
+    {
+        return;
+    }
+
+    const uint32_t optionalParams[4] = { outputChannel, stride, dilation, padding };
+    if (!manager->SetCBufferOptionalParams(output->m_dataHandles.m_cbufferHandle, optionalParams, 4u))
+    {
+        return;
+    }
+
+    ID3D11Buffer* outCBuffer = manager->GetCBuffer(output->m_dataHandles.m_cbufferHandle);
+    ID3D11Buffer* inCBuffer = manager->GetCBuffer(input->m_dataHandles.m_cbufferHandle);
+    ID3D11Buffer* kernelCBuffer = manager->GetCBuffer(kernel->m_dataHandles.m_cbufferHandle);
+    ID3D11Buffer* biasCBuffer = bias ? manager->GetCBuffer(bias->m_dataHandles.m_cbufferHandle) : nullptr;
+    if (!outCBuffer || !inCBuffer || !kernelCBuffer || (bias && !biasCBuffer))
+    {
+        return;
+    }
+
+    ID3D11ShaderResourceView* inSRV = manager->GetBufferSRV(input->m_dataHandles.m_bufferHandle);
+    ID3D11ShaderResourceView* kernelSRV = manager->GetBufferSRV(kernel->m_dataHandles.m_bufferHandle);
+    ID3D11ShaderResourceView* biasSRV = bias ? manager->GetBufferSRV(bias->m_dataHandles.m_bufferHandle) : nullptr;
+    ID3D11UnorderedAccessView* outUAV = manager->GetBufferUAV(output->m_dataHandles.m_bufferHandle);
+    if (!inSRV || !kernelSRV || !outUAV || (bias && !biasSRV))
+    {
+        return;
+    }
+
+    context->CSSetShader(shader, nullptr, 0u);
+    if (bias)
+    {
+        ID3D11ShaderResourceView* srvs[] = { inSRV, kernelSRV, biasSRV };
+        context->CSSetShaderResources(1u, 3u, srvs);
+        ID3D11Buffer* cbs[] = { outCBuffer, inCBuffer, kernelCBuffer, biasCBuffer };
+        context->CSSetConstantBuffers(0u, 4u, cbs);
+    }
+    else
+    {
+        ID3D11ShaderResourceView* srvs[] = { inSRV, kernelSRV };
+        context->CSSetShaderResources(1u, 2u, srvs);
+        ID3D11Buffer* cbs[] = { outCBuffer, inCBuffer, kernelCBuffer };
+        context->CSSetConstantBuffers(0u, 3u, cbs);
+    }
+
+    ID3D11UnorderedAccessView* uavs[] = { outUAV };
+    context->CSSetUnorderedAccessViews(0u, 1u, uavs, nullptr);
+
+    const uint32_t elementCount = output->GetDimsX() * output->GetDimsY();
+    const uint32_t threadsPerGroup = 256u;
+    const uint32_t groupCount = (elementCount + threadsPerGroup - 1u) / threadsPerGroup;
+    context->Dispatch(groupCount, 1u, 1u);
+
+    ID3D11UnorderedAccessView* nullUAVs[] = { nullptr };
+    context->CSSetUnorderedAccessViews(0u, 1u, nullUAVs, nullptr);
+    if (bias)
+    {
+        ID3D11ShaderResourceView* nullSRVs[] = { nullptr, nullptr, nullptr };
+        context->CSSetShaderResources(1u, 3u, nullSRVs);
+    }
+    else
+    {
+        ID3D11ShaderResourceView* nullSRVs[] = { nullptr, nullptr };
+        context->CSSetShaderResources(1u, 2u, nullSRVs);
+    }
+    context->CSSetShader(nullptr, nullptr, 0u);
+    DirectX11Manager::Instance()->DumpInfoQueueErrors();
+
+    if (GPUSyncCalls)
+        DirectX11Manager::Instance()->WaitForGPU();
+}
+
+template<class T>
+void Conv2DTransposeSingleChannelBackwards(MatrixDX11<T>* errorIn,
+                                           MatrixDX11<T>* input,
+                                           MatrixDX11<T>* kernel,
+                                           MatrixDX11<T>* wUpdate,
+                                           MatrixDX11<T>* errorOut,
+                                           uint32_t outputChannel,
+                                           uint32_t stride,
+                                           uint32_t dilation,
+                                           uint32_t padding)
+{
+    assert(errorIn);
+    assert(input);
+    assert(kernel);
+    assert(outputChannel < errorIn->GetDimsZ());
+    assert(kernel->GetDimsZ() == input->GetDimsZ());
+    DirectX11Manager::Instance()->DumpInfoQueueErrors();
+
+    errorIn->Unmap();
+    input->Unmap();
+    kernel->Unmap();
+    if (wUpdate)
+    {
+        wUpdate->Unmap();
+    }
+    if (errorOut)
+    {
+        errorOut->Unmap();
+    }
+
+    DirectX11Manager* manager = errorIn->m_gInstance;
+    ID3D11DeviceContext* context = manager ? manager->GetContext() : nullptr;
+    if (!context)
+    {
+        return;
+    }
+
+    if (!SyncCBuffer(errorIn) || !SyncCBuffer(input) || !SyncCBuffer(kernel))
+    {
+        return;
+    }
+    if (wUpdate && !SyncCBuffer(wUpdate))
+    {
+        return;
+    }
+    if (errorOut && !SyncCBuffer(errorOut))
+    {
+        return;
+    }
+
+    const uint32_t optionalParams[4] = { outputChannel, stride, dilation, padding };
+    if (!manager->SetCBufferOptionalParams(errorIn->m_dataHandles.m_cbufferHandle, optionalParams, 4u))
+    {
+        return;
+    }
+
+    ID3D11ShaderResourceView* errorInSRV = manager->GetBufferSRV(errorIn->m_dataHandles.m_bufferHandle);
+    ID3D11ShaderResourceView* inputSRV = manager->GetBufferSRV(input->m_dataHandles.m_bufferHandle);
+    ID3D11ShaderResourceView* kernelSRV = manager->GetBufferSRV(kernel->m_dataHandles.m_bufferHandle);
+    if (!errorInSRV || !inputSRV || !kernelSRV)
+    {
+        return;
+    }
+
+    if (wUpdate)
+    {
+        ID3D11ComputeShader* shader = manager->GetShader("conv2d_transpose_single_channel_backwards_wupdate");
+        ID3D11Buffer* errorInCBuffer = manager->GetCBuffer(errorIn->m_dataHandles.m_cbufferHandle);
+        ID3D11Buffer* inputCBuffer = manager->GetCBuffer(input->m_dataHandles.m_cbufferHandle);
+        ID3D11Buffer* kernelCBuffer = manager->GetCBuffer(kernel->m_dataHandles.m_cbufferHandle);
+        ID3D11Buffer* wUpdateCBuffer = manager->GetCBuffer(wUpdate->m_dataHandles.m_cbufferHandle);
+        ID3D11UnorderedAccessView* wUpdateUAV = manager->GetBufferUAV(wUpdate->m_dataHandles.m_bufferHandle);
+        if (!shader || !errorInCBuffer || !inputCBuffer || !kernelCBuffer || !wUpdateCBuffer || !wUpdateUAV)
+        {
+            return;
+        }
+
+        context->CSSetShader(shader, nullptr, 0u);
+        ID3D11ShaderResourceView* srvs[] = { errorInSRV, inputSRV, kernelSRV };
+        context->CSSetShaderResources(1u, 3u, srvs);
+        ID3D11UnorderedAccessView* uavs[] = { wUpdateUAV };
+        context->CSSetUnorderedAccessViews(0u, 1u, uavs, nullptr);
+        ID3D11Buffer* cbs[] = { errorInCBuffer, inputCBuffer, kernelCBuffer, wUpdateCBuffer };
+        context->CSSetConstantBuffers(0u, 4u, cbs);
+
+        const uint32_t elementCount = wUpdate->GetElementCount();
+        const uint32_t threadsPerGroup = 256u;
+        const uint32_t groupCount = (elementCount + threadsPerGroup - 1u) / threadsPerGroup;
+        context->Dispatch(groupCount, 1u, 1u);
+
+        ID3D11UnorderedAccessView* nullUAVs[] = { nullptr };
+        context->CSSetUnorderedAccessViews(0u, 1u, nullUAVs, nullptr);
+        ID3D11ShaderResourceView* nullSRVs[] = { nullptr, nullptr, nullptr };
+        context->CSSetShaderResources(1u, 3u, nullSRVs);
+        context->CSSetShader(nullptr, nullptr, 0u);
+    }
+
+    if (errorOut)
+    {
+        ID3D11ComputeShader* shader = manager->GetShader("conv2d_transpose_single_channel_backwards_errorout");
+        ID3D11Buffer* errorInCBuffer = manager->GetCBuffer(errorIn->m_dataHandles.m_cbufferHandle);
+        ID3D11Buffer* inputCBuffer = manager->GetCBuffer(input->m_dataHandles.m_cbufferHandle);
+        ID3D11Buffer* kernelCBuffer = manager->GetCBuffer(kernel->m_dataHandles.m_cbufferHandle);
+        ID3D11Buffer* errorOutCBuffer = manager->GetCBuffer(errorOut->m_dataHandles.m_cbufferHandle);
+        ID3D11UnorderedAccessView* errorOutUAV = manager->GetBufferUAV(errorOut->m_dataHandles.m_bufferHandle);
+        if (!shader || !errorInCBuffer || !inputCBuffer || !kernelCBuffer || !errorOutCBuffer || !errorOutUAV)
+        {
+            return;
+        }
+
+        context->CSSetShader(shader, nullptr, 0u);
+        ID3D11ShaderResourceView* srvs[] = { errorInSRV, inputSRV, kernelSRV };
+        context->CSSetShaderResources(1u, 3u, srvs);
+        ID3D11UnorderedAccessView* uavs[] = { errorOutUAV };
+        context->CSSetUnorderedAccessViews(0u, 1u, uavs, nullptr);
+        ID3D11Buffer* cbs[] = { errorInCBuffer, inputCBuffer, kernelCBuffer, errorOutCBuffer };
+        context->CSSetConstantBuffers(0u, 4u, cbs);
+
+        const uint32_t elementCount = errorOut->GetElementCount();
+        const uint32_t threadsPerGroup = 256u;
+        const uint32_t groupCount = (elementCount + threadsPerGroup - 1u) / threadsPerGroup;
+        context->Dispatch(groupCount, 1u, 1u);
+
+        ID3D11UnorderedAccessView* nullUAVs[] = { nullptr };
+        context->CSSetUnorderedAccessViews(0u, 1u, nullUAVs, nullptr);
+        ID3D11ShaderResourceView* nullSRVs[] = { nullptr, nullptr, nullptr };
+        context->CSSetShaderResources(1u, 3u, nullSRVs);
+        context->CSSetShader(nullptr, nullptr, 0u);
+    }
+
+    DirectX11Manager::Instance()->DumpInfoQueueErrors();
+
+    if (GPUSyncCalls)
+        DirectX11Manager::Instance()->WaitForGPU();
+}
+
+template<class T>
+void ReluMat(MatrixDX11<T>* _out, MatrixDX11<T>* _in)
+{
+    assert(_out);
+    assert(_in);
+    assert(_out->GetElementCount() == _in->GetElementCount());
+    DirectX11Manager::Instance()->DumpInfoQueueErrors();
+
+    _out->Unmap();
+    _in->Unmap();
+
+    DirectX11Manager* manager = _out->m_gInstance;
+    ID3D11DeviceContext* context = manager ? manager->GetContext() : nullptr;
+    const bool aliasInOut = _out->m_dataHandles.m_bufferHandle == _in->m_dataHandles.m_bufferHandle;
+    const char* shaderName = aliasInOut ? "relu_inplace" : "relu";
+    ID3D11ComputeShader* shader = manager ? manager->GetShader(shaderName) : nullptr;
+    if (!context || !shader)
+    {
+        return;
+    }
+
+    if (!SyncCBuffer(_out) || (!aliasInOut && !SyncCBuffer(_in)))
+    {
+        return;
+    }
+
+    ID3D11Buffer* outCBuffer = manager->GetCBuffer(_out->m_dataHandles.m_cbufferHandle);
+    ID3D11Buffer* inCBuffer = aliasInOut ? nullptr : manager->GetCBuffer(_in->m_dataHandles.m_cbufferHandle);
+    if (!outCBuffer || (!aliasInOut && !inCBuffer))
+    {
+        return;
+    }
+
+    ID3D11ShaderResourceView* inSRV = aliasInOut ? nullptr : manager->GetBufferSRV(_in->m_dataHandles.m_bufferHandle);
+    ID3D11UnorderedAccessView* outUAV = manager->GetBufferUAV(_out->m_dataHandles.m_bufferHandle);
+    if ((!aliasInOut && !inSRV) || !outUAV)
+    {
+        return;
+    }
+
+    context->CSSetShader(shader, nullptr, 0u);
+    if (aliasInOut)
+    {
+        ID3D11Buffer* cbs[] = { outCBuffer };
+        context->CSSetConstantBuffers(0u, 1u, cbs);
+    }
+    else
+    {
+        ID3D11ShaderResourceView* srvs[] = { inSRV };
+        context->CSSetShaderResources(1u, 1u, srvs);
+        ID3D11Buffer* cbs[] = { outCBuffer, inCBuffer };
+        context->CSSetConstantBuffers(0u, 2u, cbs);
+    }
+    ID3D11UnorderedAccessView* uavs[] = { outUAV };
+    context->CSSetUnorderedAccessViews(0u, 1u, uavs, nullptr);
+
+    const uint32_t elementCount = _out->GetElementCount();
+    const uint32_t threadsPerGroup = 256u;
+    const uint32_t groupCount = (elementCount + threadsPerGroup - 1u) / threadsPerGroup;
+    context->Dispatch(groupCount, 1u, 1u);
+
+    ID3D11UnorderedAccessView* nullUAVs[] = { nullptr };
+    context->CSSetUnorderedAccessViews(0u, 1u, nullUAVs, nullptr);
+    if (!aliasInOut)
+    {
+        ID3D11ShaderResourceView* nullSRVs[] = { nullptr };
+        context->CSSetShaderResources(1u, 1u, nullSRVs);
+    }
+    context->CSSetShader(nullptr, nullptr, 0u);
+    DirectX11Manager::Instance()->DumpInfoQueueErrors();
+
+    if (GPUSyncCalls)
+        DirectX11Manager::Instance()->WaitForGPU();
+}
+
+template<class T>
+void ReluDerivativeMat(MatrixDX11<T>* _out, MatrixDX11<T>* _in)
+{
+    assert(_out);
+    assert(_in);
+    assert(_out->GetElementCount() == _in->GetElementCount());
+    DirectX11Manager::Instance()->DumpInfoQueueErrors();
+
+    _out->Unmap();
+    _in->Unmap();
+
+    DirectX11Manager* manager = _out->m_gInstance;
+    ID3D11DeviceContext* context = manager ? manager->GetContext() : nullptr;
+    const bool aliasInOut = _out->m_dataHandles.m_bufferHandle == _in->m_dataHandles.m_bufferHandle;
+    const char* shaderName = aliasInOut ? "relu_derivative_inplace" : "relu_derivative";
+    ID3D11ComputeShader* shader = manager ? manager->GetShader(shaderName) : nullptr;
+    if (!context || !shader)
+    {
+        return;
+    }
+
+    if (!SyncCBuffer(_out) || (!aliasInOut && !SyncCBuffer(_in)))
+    {
+        return;
+    }
+
+    ID3D11Buffer* outCBuffer = manager->GetCBuffer(_out->m_dataHandles.m_cbufferHandle);
+    ID3D11Buffer* inCBuffer = aliasInOut ? nullptr : manager->GetCBuffer(_in->m_dataHandles.m_cbufferHandle);
+    if (!outCBuffer || (!aliasInOut && !inCBuffer))
+    {
+        return;
+    }
+
+    ID3D11ShaderResourceView* inSRV = aliasInOut ? nullptr : manager->GetBufferSRV(_in->m_dataHandles.m_bufferHandle);
+    ID3D11UnorderedAccessView* outUAV = manager->GetBufferUAV(_out->m_dataHandles.m_bufferHandle);
+    if ((!aliasInOut && !inSRV) || !outUAV)
+    {
+        return;
+    }
+
+    context->CSSetShader(shader, nullptr, 0u);
+    if (aliasInOut)
+    {
+        ID3D11Buffer* cbs[] = { outCBuffer };
+        context->CSSetConstantBuffers(0u, 1u, cbs);
+    }
+    else
+    {
+        ID3D11ShaderResourceView* srvs[] = { inSRV };
+        context->CSSetShaderResources(1u, 1u, srvs);
+        ID3D11Buffer* cbs[] = { outCBuffer, inCBuffer };
+        context->CSSetConstantBuffers(0u, 2u, cbs);
+    }
+    ID3D11UnorderedAccessView* uavs[] = { outUAV };
+    context->CSSetUnorderedAccessViews(0u, 1u, uavs, nullptr);
+
+    const uint32_t elementCount = _out->GetElementCount();
+    const uint32_t threadsPerGroup = 256u;
+    const uint32_t groupCount = (elementCount + threadsPerGroup - 1u) / threadsPerGroup;
+    context->Dispatch(groupCount, 1u, 1u);
+
+    ID3D11UnorderedAccessView* nullUAVs[] = { nullptr };
+    context->CSSetUnorderedAccessViews(0u, 1u, nullUAVs, nullptr);
+    if (!aliasInOut)
+    {
+        ID3D11ShaderResourceView* nullSRVs[] = { nullptr };
+        context->CSSetShaderResources(1u, 1u, nullSRVs);
+    }
+    context->CSSetShader(nullptr, nullptr, 0u);
+    DirectX11Manager::Instance()->DumpInfoQueueErrors();
+
+    if (GPUSyncCalls)
+        DirectX11Manager::Instance()->WaitForGPU();
+}
+
+template<class T>
 void GeluMat(MatrixDX11<T>* _out, MatrixDX11<T>* _in)
 {
     assert(_out);
@@ -1609,6 +2605,94 @@ void Scale(MatrixDX11<T>* _out, MatrixDX11<T>* _in, MatrixDX11<T>* _scale)
         context->CSSetShaderResources(1u, 2u, nullSRVs);
     }
     context->CSSetShader(nullptr, nullptr, 0u);
+    DirectX11Manager::Instance()->DumpInfoQueueErrors();
+
+    if (GPUSyncCalls)
+        DirectX11Manager::Instance()->WaitForGPU();
+}
+
+template<class T>
+void Scale(MatrixDX11<T>* _out, MatrixDX11<T>* _in, float _scale)
+{
+    assert(_out);
+    assert(_in);
+    assert(_out->GetElementCount() == _in->GetElementCount());
+    DirectX11Manager::Instance()->DumpInfoQueueErrors();
+
+    _out->Unmap();
+    _in->Unmap();
+
+    DirectX11Manager* manager = _out->m_gInstance;
+    ID3D11DeviceContext* context = manager ? manager->GetContext() : nullptr;
+    const bool aliasInOut = _out->m_dataHandles.m_bufferHandle == _in->m_dataHandles.m_bufferHandle;
+    const char* shaderName = aliasInOut ? "scale_scalar_inplace" : "scale_scalar";
+    ID3D11ComputeShader* shader = manager ? manager->GetShader(shaderName) : nullptr;
+    if (!context || !shader)
+    {
+        return;
+    }
+
+    if (!SyncCBuffer(_out) || (!aliasInOut && !SyncCBuffer(_in)))
+    {
+        return;
+    }
+
+    uint32_t packedScale = 0u;
+    std::memcpy(&packedScale, &_scale, sizeof(uint32_t));
+    const uint32_t optionalParams[1] = { packedScale };
+    if (!manager->SetCBufferOptionalParams(_out->m_dataHandles.m_cbufferHandle, optionalParams, 1u))
+    {
+        return;
+    }
+
+    ID3D11Buffer* outCBuffer = manager->GetCBuffer(_out->m_dataHandles.m_cbufferHandle);
+    ID3D11Buffer* inCBuffer = aliasInOut ? nullptr : manager->GetCBuffer(_in->m_dataHandles.m_cbufferHandle);
+    if (!outCBuffer || (!aliasInOut && !inCBuffer))
+    {
+        return;
+    }
+
+    ID3D11UnorderedAccessView* outUAV = manager->GetBufferUAV(_out->m_dataHandles.m_bufferHandle);
+    ID3D11ShaderResourceView* inSRV = aliasInOut ? nullptr : manager->GetBufferSRV(_in->m_dataHandles.m_bufferHandle);
+    if (!outUAV || (!aliasInOut && !inSRV))
+    {
+        return;
+    }
+
+    context->CSSetShader(shader, nullptr, 0u);
+    if (aliasInOut)
+    {
+        ID3D11Buffer* cbs[] = { outCBuffer };
+        context->CSSetConstantBuffers(0u, 1u, cbs);
+    }
+    else
+    {
+        ID3D11ShaderResourceView* srvs[] = { inSRV };
+        context->CSSetShaderResources(1u, 1u, srvs);
+        ID3D11Buffer* cbs[] = { outCBuffer, inCBuffer };
+        context->CSSetConstantBuffers(0u, 2u, cbs);
+    }
+
+    ID3D11UnorderedAccessView* uavs[] = { outUAV };
+    context->CSSetUnorderedAccessViews(0u, 1u, uavs, nullptr);
+
+    const uint32_t elementCount = _out->GetElementCount();
+    const uint32_t threadsPerGroup = 256u;
+    const uint32_t groupCount = (elementCount + threadsPerGroup - 1u) / threadsPerGroup;
+    context->Dispatch(groupCount, 1u, 1u);
+
+    ID3D11UnorderedAccessView* nullUAVs[] = { nullptr };
+    context->CSSetUnorderedAccessViews(0u, 1u, nullUAVs, nullptr);
+    if (aliasInOut)
+    {
+        context->CSSetShader(nullptr, nullptr, 0u);
+    }
+    else
+    {
+        ID3D11ShaderResourceView* nullSRVs[] = { nullptr };
+        context->CSSetShaderResources(1u, 1u, nullSRVs);
+        context->CSSetShader(nullptr, nullptr, 0u);
+    }
     DirectX11Manager::Instance()->DumpInfoQueueErrors();
 
     if (GPUSyncCalls)

@@ -37,46 +37,38 @@ cbuffer MatIndices_Params : register(b2)
     uint4 idx_optionalParams[4];
 };
 
-RWStructuredBuffer<uint> MatOut : register(u0);
+RWStructuredBuffer<float> MatOut : register(u0);
 StructuredBuffer<float> MatIndices : register(t0);
 StructuredBuffer<float> MatSrc : register(t1);
 
 [numthreads(256, 1, 1)]
 void CSMain(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
-    uint srcIndexLinear = dispatchThreadId.x;
-    uint srcPlane = src_dimx * src_dimy;
-    uint srcCount = srcPlane * src_dimz;
-    if (srcIndexLinear >= srcCount)
-        return;
-
-    uint srcZ = srcIndexLinear / srcPlane;
-    uint srcPlaneIndex = srcIndexLinear - srcZ * srcPlane;
-    uint srcRow = srcPlaneIndex / src_dimx;
-    uint col = srcPlaneIndex - srcRow * src_dimx;
-
-    uint idxIndex = idx_offset + srcZ * idx_dimx * idx_dimy + srcRow * idx_dimx;
-    uint dstRow = (uint)MatIndices[idxIndex];
-    if (dstRow >= out_dimy)
-        return;
-
-    uint dstZ = (out_dimz == 1u) ? 0u : srcZ;
+    uint outIndexLinear = dispatchThreadId.x;
     uint outPlane = out_dimx * out_dimy;
-    uint srcIndex = src_offset + srcIndexLinear;
-    uint dstIndex = out_offset + dstZ * outPlane + dstRow * out_dimx + col;
-    float addValue = MatSrc[srcIndex];
+    uint outCount = outPlane * out_dimz;
+    if (outIndexLinear >= outCount)
+        return;
 
-    uint expected = MatOut[dstIndex];
-    for (;;)
+    uint outZ = outIndexLinear / outPlane;
+    uint outPlaneIndex = outIndexLinear - outZ * outPlane;
+    uint outRow = outPlaneIndex / out_dimx;
+    uint col = outPlaneIndex - outRow * out_dimx;
+
+    uint srcZ = (src_dimz == 1u) ? 0u : outZ;
+    uint srcPlane = src_dimx * src_dimy;
+    float sum = MatOut[out_offset + outIndexLinear];
+
+    for (uint srcRow = 0u; srcRow < src_dimy; ++srcRow)
     {
-        const float currentValue = asfloat(expected);
-        const uint desired = asuint(currentValue + addValue);
-        uint original = 0u;
-        InterlockedCompareExchange(MatOut[dstIndex], expected, desired, original);
-        if (original == expected)
+        uint idxIndex = idx_offset + srcZ * idx_dimx * idx_dimy + srcRow * idx_dimx;
+        uint dstRow = (uint)MatIndices[idxIndex];
+        if (dstRow == outRow)
         {
-            break;
+            uint srcIndex = src_offset + srcZ * srcPlane + srcRow * src_dimx + col;
+            sum += MatSrc[srcIndex];
         }
-        expected = original;
     }
+
+    MatOut[out_offset + outIndexLinear] = sum;
 }

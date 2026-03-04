@@ -1,5 +1,6 @@
 #pragma once
 
+#include <MatrixLibrary/MatrixBase.h>
 #include <ToolsLibrary/ThreadPool.h>
 
 #include <latch>
@@ -20,6 +21,29 @@
 // Min/Max
 // Sum Columns
 
+template<class T>
+T MeanSquaredErrorLoss(MatrixBase<T>* target, MatrixBase<T>* prediction)
+{
+    assert(target);
+    assert(prediction);
+    assert(target->GetElementCount() == prediction->GetElementCount());
+
+    const size_t count = target->GetElementCount();
+    if (count == 0u)
+    {
+        return T(0);
+    }
+
+    const T* targetPtr = target->DataRead();
+    const T* predictionPtr = prediction->DataRead();
+    T sum = T(0);
+    for (size_t i = 0; i < count; ++i)
+    {
+        const T d = targetPtr[i] - predictionPtr[i];
+        sum += d * d;
+    }
+    return sum / static_cast<T>(count);
+}
 
 template<class T>
 void Softmax(MatrixBase<T>* out, MatrixBase<T>* in)
@@ -153,6 +177,25 @@ void CopyRange(MatrixBase<T>* _out,
     std::memcpy(_out->DataWrite() + outOffset,
                 _in->DataRead() + inOffset,
                 sizeof(T) * count);
+}
+
+template<class T>
+void ConcatZ(MatrixBase<T>* _out, MatrixBase<T>* _A, MatrixBase<T>* _B)
+{
+    assert(_out);
+    assert(_A);
+    assert(_B);
+    assert(_A->GetDimsX() == _B->GetDimsX());
+    assert(_A->GetDimsY() == _B->GetDimsY());
+    assert(_out->GetDimsX() == _A->GetDimsX());
+    assert(_out->GetDimsY() == _A->GetDimsY());
+    assert(_out->GetDimsZ() == _A->GetDimsZ() + _B->GetDimsZ());
+
+    const uint32_t countA = _A->GetElementCount();
+    const uint32_t countB = _B->GetElementCount();
+
+    std::memcpy(_out->DataWrite(), _A->DataRead(), sizeof(T) * countA);
+    std::memcpy(_out->DataWrite() + countA, _B->DataRead(), sizeof(T) * countB);
 }
 
 template<class T>
@@ -916,6 +959,32 @@ void PerElement_Func(MatrixBase<T>* _out, MatrixBase<T>* _L, MatrixBase<T>* _R, 
 }
 
 template<class T>
+void ReluMat(MatrixBase<T>* _out, MatrixBase<T>* _in)
+{
+    assert(_out);
+    assert(_in);
+    const uint32_t elemCount = _in->GetElementCount();
+    for (uint32_t i = 0; i < elemCount; ++i)
+    {
+        const T x = _in->DataRead()[i];
+        _out->DataWrite()[i] = x > static_cast<T>(0) ? x : static_cast<T>(0);
+    }
+}
+
+template<class T>
+void ReluDerivativeMat(MatrixBase<T>* _out, MatrixBase<T>* _in)
+{
+    assert(_out);
+    assert(_in);
+    const uint32_t elemCount = _in->GetElementCount();
+    for (uint32_t i = 0; i < elemCount; ++i)
+    {
+        const T x = _in->DataRead()[i];
+        _out->DataWrite()[i] = x > static_cast<T>(0) ? static_cast<T>(1) : static_cast<T>(0);
+    }
+}
+
+template<class T>
 void GeluMat(MatrixBase<T>* _out, MatrixBase<T>* _in)
 {
     assert(_out);
@@ -1294,6 +1363,128 @@ void Conv2DSingleChannelBackwards(MatrixBase<T>* errorIn,
                                 val += kernel->GetValue(kx, ky, kz) * grad;
                                 errorOut->SetValue(static_cast<uint32_t>(inX), static_cast<uint32_t>(inY), kz, val);
                             }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+template<class T>
+void Conv2DTransposeSingleChannel(MatrixBase<T>* output,
+                                  MatrixBase<T>* input,
+                                  MatrixBase<T>* kernel,
+                                  MatrixBase<T>* bias,
+                                  uint32_t outputChannel,
+                                  uint32_t stride,
+                                  uint32_t dilation,
+                                  uint32_t padding)
+{
+    assert(output);
+    assert(input);
+    assert(kernel);
+    assert(outputChannel < output->GetDimsZ());
+    assert(kernel->GetDimsZ() == input->GetDimsZ());
+
+    const T biasValue = bias ? bias->GetValue(outputChannel, 0u) : static_cast<T>(0);
+    for (uint32_t y = 0; y < output->GetDimsY(); ++y)
+    {
+        for (uint32_t x = 0; x < output->GetDimsX(); ++x)
+        {
+            output->SetValue(x, y, outputChannel, biasValue);
+        }
+    }
+
+    for (uint32_t ic = 0; ic < input->GetDimsZ(); ++ic)
+    {
+        for (uint32_t inY = 0; inY < input->GetDimsY(); ++inY)
+        {
+            for (uint32_t inX = 0; inX < input->GetDimsX(); ++inX)
+            {
+                const T inputValue = input->GetValue(inX, inY, ic);
+                for (uint32_t ky = 0; ky < kernel->GetDimsY(); ++ky)
+                {
+                    for (uint32_t kx = 0; kx < kernel->GetDimsX(); ++kx)
+                    {
+                        const int32_t outX = static_cast<int32_t>(inX * stride + kx * dilation)
+                                           - static_cast<int32_t>(padding);
+                        const int32_t outY = static_cast<int32_t>(inY * stride + ky * dilation)
+                                           - static_cast<int32_t>(padding);
+
+                        if (outX >= 0 && outY >= 0
+                            && outX < static_cast<int32_t>(output->GetDimsX())
+                            && outY < static_cast<int32_t>(output->GetDimsY()))
+                        {
+                            T val = output->GetValue(static_cast<uint32_t>(outX),
+                                                     static_cast<uint32_t>(outY),
+                                                     outputChannel);
+                            val += inputValue * kernel->GetValue(kx, ky, ic);
+                            output->SetValue(static_cast<uint32_t>(outX),
+                                             static_cast<uint32_t>(outY),
+                                             outputChannel,
+                                             val);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+template<class T>
+void Conv2DTransposeSingleChannelBackwards(MatrixBase<T>* errorIn,
+                                           MatrixBase<T>* input,
+                                           MatrixBase<T>* kernel,
+                                           MatrixBase<T>* wUpdate,
+                                           MatrixBase<T>* errorOut,
+                                           uint32_t outputChannel,
+                                           uint32_t stride,
+                                           uint32_t dilation,
+                                           uint32_t padding)
+{
+    assert(errorIn);
+    assert(input);
+    assert(kernel);
+    assert(outputChannel < errorIn->GetDimsZ());
+    assert(kernel->GetDimsZ() == input->GetDimsZ());
+
+    for (uint32_t ic = 0; ic < input->GetDimsZ(); ++ic)
+    {
+        for (uint32_t inY = 0; inY < input->GetDimsY(); ++inY)
+        {
+            for (uint32_t inX = 0; inX < input->GetDimsX(); ++inX)
+            {
+                const T inputValue = input->GetValue(inX, inY, ic);
+                for (uint32_t ky = 0; ky < kernel->GetDimsY(); ++ky)
+                {
+                    for (uint32_t kx = 0; kx < kernel->GetDimsX(); ++kx)
+                    {
+                        const int32_t outX = static_cast<int32_t>(inX * stride + kx * dilation)
+                                           - static_cast<int32_t>(padding);
+                        const int32_t outY = static_cast<int32_t>(inY * stride + ky * dilation)
+                                           - static_cast<int32_t>(padding);
+                        if (outX < 0 || outY < 0
+                            || outX >= static_cast<int32_t>(errorIn->GetDimsX())
+                            || outY >= static_cast<int32_t>(errorIn->GetDimsY()))
+                        {
+                            continue;
+                        }
+
+                        const T grad = errorIn->GetValue(static_cast<uint32_t>(outX),
+                                                         static_cast<uint32_t>(outY),
+                                                         outputChannel);
+                        if (wUpdate)
+                        {
+                            T val = wUpdate->GetValue(kx, ky, ic);
+                            val += inputValue * grad;
+                            wUpdate->SetValue(kx, ky, ic, val);
+                        }
+                        if (errorOut)
+                        {
+                            T val = errorOut->GetValue(inX, inY, ic);
+                            val += kernel->GetValue(kx, ky, ic) * grad;
+                            errorOut->SetValue(inX, inY, ic, val);
                         }
                     }
                 }

@@ -3,7 +3,10 @@
 #include <cmath>
 #include <cstddef>
 #include <LossLibrary/Loss.h>
-#include <MatrixLibrary/MatrixBase.h>
+#include <MatrixLibrary/MatrixBase_Functions.h>
+#ifdef _WIN32
+#include <MatrixLibrary/GPU/DirectX11/MatrixDX11_Functions.h>
+#endif
 
 template<class T, class MatT>
 class MeanSquaredError : public LossBase<T, MatT>
@@ -13,23 +16,10 @@ class MeanSquaredError : public LossBase<T, MatT>
     {
         return "MeanSquaredError";
     }
+
     virtual T Loss(MatT* target, MatT* prediction) override
     {
-        const T* t = target->DataRead();
-        const T* p = prediction->DataRead();
-        T sum = T(0);
-        const size_t count = target->GetElementCount();
-        if (count == 0)
-        {
-            return T(0);
-        }
-
-        for(size_t i = 0; i < count; ++i)
-        {
-            T d = t[i] - p[i];
-            sum += d * d;
-        }
-        return sum / static_cast<T>(count);
+        return MeanSquaredErrorLoss(target, prediction);
     }
 
     virtual void Gradient(MatT* out, MatT* target, MatT* prediction) override
@@ -37,9 +27,6 @@ class MeanSquaredError : public LossBase<T, MatT>
         Sub(out, target, prediction);
         const size_t count = out->GetElementCount();
         const T invCount = count ? T(1) / static_cast<T>(count) : T(0);
-        MapFunction(out, out, [invCount](T& v)
-        {
-            return v * (T(2) * invCount);
-        });
+        Scale(out, out, static_cast<float>(T(2) * invCount));
     }
 };
