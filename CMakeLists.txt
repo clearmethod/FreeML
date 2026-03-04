@@ -8,11 +8,13 @@ set(Example_OrGate_SRC Examples/OrGate/OrGate.cpp)
 set(Example_OrGateBatched_SRC Examples/OrGate/OrGateBatched.cpp)
 set(HelloFreeML_SRC Examples/HelloFreeML/HelloFreeML.cpp)
 set(NanoLLM_SRC Examples/NanoLLM/NanoLLM.cpp)
-set(ML2_TARGETS 
-      Example_OrGate 
+set(DiffusionModel_SRC Examples/DiffusionModel/Diffusion.cpp)
+set(ML2_TARGETS
+      Example_OrGate
       Example_OrGateBatched
       HelloFreeML
       NanoLLM
+      DiffusionModel
     )
 
 foreach(tgt IN LISTS ML2_TARGETS)
