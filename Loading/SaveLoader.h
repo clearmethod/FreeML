@@ -7,12 +7,15 @@
 #include <LayerLibrary/CausalSelfAttentionLayer.h>
 #include <LayerLibrary/Conv2D.h>
 #include <LayerLibrary/Conv2DTranspose.h>
+#include <LayerLibrary/UNet.h>
 #include <LayerLibrary/Dense.h>
 #include <LayerLibrary/DropoutLayer.h>
 #include <LayerLibrary/Embedding.h>
 #include <LayerLibrary/FlattenCopyLayer.h>
 #include <LayerLibrary/LayerNorm.h>
 #include <LayerLibrary/TransformerBlock.h>
+#include <LayerLibrary/VariationalAutoencoder.h>
+#include <LayerLibrary/VariationalAutoencoder_Decode.h>
 #include <ActivationLibrary/Activations.h>
 #include <MatrixLibrary/MatrixManager.h>
 #include <LossLibrary/Losses.h>
@@ -1069,6 +1072,66 @@ class SaveLoader
         return new ActivationLayer<T, Identity<T>, Mat>();
     }
 
+    static Layer<T, Mat>* CreateConv2DFromMeta(const std::string& meta)
+    {
+        const std::string norm = NormalizeMeta(meta);
+        if (norm == "gelu")
+        {
+            return new Conv2D<T, Gelu<T, Mat>, Mat>();
+        }
+        if (norm == "relu")
+        {
+            return new Conv2D<T, Relu<T>, Mat>();
+        }
+        if (norm == "relu_opt")
+        {
+            return new Conv2D<T, ReluOpt<T>, Mat>();
+        }
+        if (norm == "leaky_relu")
+        {
+            return new Conv2D<T, LeakyRelu<T>, Mat>();
+        }
+        if (norm == "sigmoid")
+        {
+            return new Conv2D<T, Sigmoid<T>, Mat>();
+        }
+        if (norm == "tanh")
+        {
+            return new Conv2D<T, Tanh<T>, Mat>();
+        }
+        return new Conv2D<T, Identity<T>, Mat>();
+    }
+
+    static Layer<T, Mat>* CreateConv2DTransposeFromMeta(const std::string& meta)
+    {
+        const std::string norm = NormalizeMeta(meta);
+        if (norm == "gelu")
+        {
+            return new Conv2DTranspose<T, Gelu<T, Mat>, Mat>();
+        }
+        if (norm == "relu")
+        {
+            return new Conv2DTranspose<T, Relu<T>, Mat>();
+        }
+        if (norm == "relu_opt")
+        {
+            return new Conv2DTranspose<T, ReluOpt<T>, Mat>();
+        }
+        if (norm == "leaky_relu")
+        {
+            return new Conv2DTranspose<T, LeakyRelu<T>, Mat>();
+        }
+        if (norm == "sigmoid")
+        {
+            return new Conv2DTranspose<T, Sigmoid<T>, Mat>();
+        }
+        if (norm == "tanh")
+        {
+            return new Conv2DTranspose<T, Tanh<T>, Mat>();
+        }
+        return new Conv2DTranspose<T, Identity<T>, Mat>();
+    }
+
     static Layer<T, Mat>* CreateLayerFromTypeName(const std::string& typeName, const std::string& meta = "")
     {
         if (typeName == "Dense")
@@ -1077,11 +1140,15 @@ class SaveLoader
         }
         if (typeName == "Conv2D")
         {
-            return new Conv2D<T, Identity<T>, Mat>();
+            return CreateConv2DFromMeta(meta);
         }
         if (typeName == "Conv2DTranspose")
         {
-            return new Conv2DTranspose<T, Identity<T>, Mat>();
+            return CreateConv2DTransposeFromMeta(meta);
+        }
+        if (typeName == "UNet")
+        {
+            return new UNet<T, Identity<T>, Mat>();
         }
         if (typeName == "ActivationLayer")
         {
@@ -1114,6 +1181,14 @@ class SaveLoader
         if (typeName == "FlattenCopy")
         {
             return new FlattenCopyLayer<T, Mat>();
+        }
+        if (typeName == "VariationalAutoencoder")
+        {
+            return new VariationalAutoencoder<T, Identity<T>, Mat>();
+        }
+        if (typeName == "VariationalAutoencoder_Decode")
+        {
+            return new VariationalAutoencoder_Decode<T, Identity<T>, Mat>();
         }
         return nullptr;
     }
