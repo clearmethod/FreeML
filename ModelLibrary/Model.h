@@ -15,6 +15,7 @@
 
 #include <Loading/SaveLoader.h>
 
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -56,6 +57,10 @@ class Model
         m_timingsForward.clear();
         m_timingsBackward.clear();
         m_timingsOther.clear();
+
+        m_rollingLossHistory.clear();
+        m_rollingLossSum = 0.0;
+        m_rollingLoss    = 0.0;
 
         m_executionOrder.clear();
 
@@ -756,7 +761,7 @@ class Model
         return out;
     }
 
-    void Run(Mat* _input, Mat* _target)
+    void Run(Mat* _input, Mat* _target, bool storeLoss = false)
     {
         if (!m_lossFunc)
         {
@@ -790,8 +795,26 @@ class Model
             Timer lossTimer;
             lossTimer.Start();
             m_lossFunc->Gradient(m_outputErrorMatrix.get(), _target, finalOutputMat);
-            double loss = m_lossFunc->Loss(_target, finalOutputMat);
-            m_lastLoss = loss;
+            double loss = 0.0f;
+            if(storeLoss)
+            {
+                loss = m_lossFunc->Loss(_target, finalOutputMat);
+
+                // Rolling window average
+                if (m_rollingLossHistory.size() >= m_rollingLossWindow)
+                {
+                    m_rollingLossSum -= m_rollingLossHistory.front();
+                    m_rollingLossHistory.pop_front();
+                }
+
+                m_rollingLossHistory.push_back(loss);
+                m_rollingLossSum += loss;
+                m_rollingLoss = m_rollingLossSum / static_cast<double>(m_rollingLossHistory.size());
+                m_lastLoss = loss;
+            }
+
+
+
             double losselapsed = lossTimer.Elapsed();
             AddTimingOther("Loss Func", losselapsed, m_timingsOther);
 
@@ -973,6 +996,23 @@ class Model
         return m_lastLoss;
     }
 
+    double GetRollingLoss()
+    {
+        return m_rollingLoss;
+    }
+
+    void SetRollingLossWindow(uint32_t _window)
+    {
+        m_rollingLossWindow = (_window > 0u) ? _window : 1u;
+        while (m_rollingLossHistory.size() > m_rollingLossWindow)
+        {
+            m_rollingLossSum -= m_rollingLossHistory.front();
+            m_rollingLossHistory.pop_front();
+        }
+        if (!m_rollingLossHistory.empty())
+            m_rollingLoss = m_rollingLossSum / static_cast<double>(m_rollingLossHistory.size());
+    }
+
     void SetLoss(LossBase<T,Mat>* _in)
     {
         m_lossFunc = _in;
@@ -1055,13 +1095,18 @@ class Model
 	}
 
     MatrixRef   m_inputMatrix;
-	Dims3D      m_expectedInputDims = Dims3D(0,0);
+	Dims3D      m_expectedInputDims         = Dims3D(0,0);
     MatrixRef   m_outputErrorMatrix;
-    T           m_lastLoss = T(0);
+    T           m_lastLoss                  = T(0);
 
-    LossBase<T, Mat>*                               m_lossFunc = nullptr;
-    Optimiser<T, Mat>*                              m_optimiser = nullptr;
-    Layer<T, Mat>*                                  m_finalOutput = nullptr;
+    uint32_t           m_rollingLossWindow  = 100u;
+    std::deque<double> m_rollingLossHistory;
+    double             m_rollingLossSum     = 0.0;
+    double             m_rollingLoss        = 0.0;
+
+    LossBase<T, Mat>*  m_lossFunc    = nullptr;
+    Optimiser<T, Mat>* m_optimiser   = nullptr;
+    Layer<T, Mat>*     m_finalOutput = nullptr;
 
     std::vector<Layer<T, Mat>*>                         m_executionOrder;
     std::vector  <Layer<T, Mat>*>                       m_allLayers;
