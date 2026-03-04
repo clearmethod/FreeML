@@ -78,7 +78,7 @@ int main()
 
     // Setup Optimiser
     //////////////////
-    AdamOptimiser<T, MatType> adamopt(0.01);
+    AdamOptimiser<T, MatType>* adamopt = new AdamOptimiser<T, MatType>(0.01);
 
     // Create Layers and Model
     //////////////////////////
@@ -96,7 +96,7 @@ int main()
     m.SetName("ORGateModel");
     m.AddLayer(layer0, denseData0);
     m.SetFinalOutputLayer(layer0);
-    m.SetOptimiser(&adamopt);
+    m.SetOptimiser(adamopt);
     m.Init();
     
     // Run Training
