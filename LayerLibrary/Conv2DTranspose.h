@@ -7,13 +7,29 @@
 #include <MatrixLibrary/GPU/DirectX11/MatrixDX11_Functions.h>
 
 #include "../ToolsLibrary/Tools.h"
+#include <ActivationLibrary/Identity.h>
 
 #include <cmath>
 #include <cstdint>
 #include <functional>
+#include <string>
+#include <type_traits>
 #include <utility>
 
 #include "Datablob.h"
+
+struct ConvTransposeSettings
+{
+    uint32_t inChannels = 0u;
+    uint32_t outChannels = 0u;
+    Dims3D   kernelSize = Dims3D(1u, 1u, 1u);
+    uint32_t stride = 1u;
+    uint32_t padding = 0u;
+    uint32_t outputPadding = 0u;
+    uint32_t dilation = 1u;
+    bool     useBias = true;
+    std::string activation;
+};
 
 template<class T, class Mat = MatrixCPU<T>>
 Datablob<T, Mat>* InitConv2DTransposeBlob(uint32_t       _inChannels,
@@ -113,11 +129,18 @@ template<class T, class ActFunc, class Mat = MatrixCPU<T>>
 class Conv2DTranspose : public Layer<T, Mat>
 {
     using MatrixRef = typename MatrixManager<T, Mat>::MatrixRef;
+    static constexpr bool kIsIdentity = std::is_same_v<ActFunc, Identity<T>>;
 
 public:
     virtual std::string GetTypeName() override
     {
         return "Conv2DTranspose";
+    }
+
+    virtual std::string GetMetaData() override
+    {
+        ActFunc act;
+        return act.Name();
     }
 
     std::vector<MatrixRef>* GetWeights(Datablob<T, Mat>* _blob) override
@@ -226,11 +249,22 @@ public:
         auto outputRef = inst.AllocateMatrix({outx, outy, outChannels}, "Output_0");
         _blob->Set("Output_0", outputRef);
 
+        if constexpr (!kIsIdentity)
+        {
+            auto outputPreActivationRef = inst.AllocateMatrix({outx, outy, outChannels}, "OutputPreActivation");
+            _blob->Set("OutputPreActivation", outputPreActivationRef);
+        }
+
         MatrixRef wUpdateRef = _blob->AcquireMatrix("WUpdate_0");
         if (wUpdateRef.get() != nullptr)
         {
             auto errorOut = inst.AllocateMatrix({_input->GetDimsX(), _input->GetDimsY(), _input->GetDimsZ()}, "ErrorOut");
             _blob->Set("ErrorOut", errorOut);
+            if constexpr (!kIsIdentity)
+            {
+                auto deltaRef = inst.AllocateMatrix({outx, outy, outChannels}, "Delta");
+                _blob->Set("Delta", deltaRef);
+            }
         }
     }
 
@@ -240,6 +274,8 @@ public:
         Mat* input = inputRef.get();
         MatrixRef outputRef = _blob->AcquireMatrix("Output_0");
         Mat* output = outputRef.get();
+        [[maybe_unused]] MatrixRef outputPreActivationRef = _blob->AcquireMatrix("OutputPreActivation");
+        [[maybe_unused]] Mat* outputPreActivation = outputPreActivationRef.get();
         MatrixRef biasRef = _blob->AcquireMatrix("Bias");
         Mat* bias = biasRef.get();
 
@@ -253,6 +289,8 @@ public:
         assert(output);
         assert(input->GetDimsZ() == inChannels && "Input channels must match Conv2DTranspose in-channels");
 
+        Mat* linearOut = kIsIdentity ? output : outputPreActivation;
+
         Clear(output);
         for (uint32_t oc = 0; oc < outChannels; ++oc)
         {
@@ -263,43 +301,13 @@ public:
                 continue;
             }
             assert(kernel->GetDimsZ() == inChannels);
+            Conv2DTransposeSingleChannel<T>(linearOut, input, kernel, bias, oc, stride, dilation, padding);
+        }
 
-            const T biasValue = bias ? bias->GetValue(oc, 0u) : static_cast<T>(0);
-            for (uint32_t y = 0; y < output->GetDimsY(); ++y)
-            {
-                for (uint32_t x = 0; x < output->GetDimsX(); ++x)
-                {
-                    output->SetValue(x, y, oc, biasValue);
-                }
-            }
-
-            for (uint32_t ic = 0; ic < inChannels; ++ic)
-            {
-                for (uint32_t inY = 0; inY < input->GetDimsY(); ++inY)
-                {
-                    for (uint32_t inX = 0; inX < input->GetDimsX(); ++inX)
-                    {
-                        const T inputValue = input->GetValue(inX, inY, ic);
-                        for (uint32_t ky = 0; ky < kernel->GetDimsY(); ++ky)
-                        {
-                            for (uint32_t kx = 0; kx < kernel->GetDimsX(); ++kx)
-                            {
-                                const int32_t outX = static_cast<int32_t>(inX * stride + kx * dilation) - static_cast<int32_t>(padding);
-                                const int32_t outY = static_cast<int32_t>(inY * stride + ky * dilation) - static_cast<int32_t>(padding);
-
-                                if (outX >= 0 && outY >= 0
-                                    && outX < static_cast<int32_t>(output->GetDimsX())
-                                    && outY < static_cast<int32_t>(output->GetDimsY()))
-                                {
-                                    T val = output->GetValue(static_cast<uint32_t>(outX), static_cast<uint32_t>(outY), oc);
-                                    val += inputValue * kernel->GetValue(kx, ky, ic);
-                                    output->SetValue(static_cast<uint32_t>(outX), static_cast<uint32_t>(outY), oc, val);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+        if constexpr (!kIsIdentity)
+        {
+            ActFunc act;
+            act.activateMat(output, linearOut, GetGlobalThreadPool());
         }
     }
 
@@ -307,6 +315,12 @@ public:
     {
         MatrixRef errorInRef = _blob->AcquireMatrix("ErrorInput_0");
         Mat* errorIn = errorInRef.get();        // Incoming gradient (dL/dY)
+        [[maybe_unused]] MatrixRef outputPreActivationRef = _blob->AcquireMatrix("OutputPreActivation");
+        [[maybe_unused]] Mat* outputPreActivation = outputPreActivationRef.get();
+        [[maybe_unused]] MatrixRef outputRef = _blob->AcquireMatrix("Output_0");
+        [[maybe_unused]] Mat* output = outputRef.get();
+        [[maybe_unused]] MatrixRef deltaRef = _blob->AcquireMatrix("Delta");
+        [[maybe_unused]] Mat* delta = deltaRef.get();
         MatrixRef inputRef = _blob->AcquireMatrix("Input_0");
         Mat* input = inputRef.get();            // Input (X)
         MatrixRef errorOutRef = _blob->AcquireMatrix("ErrorOut");
@@ -323,6 +337,15 @@ public:
         assert(errorIn);
         assert(input);
         assert(input->GetDimsZ() == inChannels);
+
+        Mat* effectiveError = errorIn;
+        if constexpr (!kIsIdentity)
+        {
+            ActFunc act;
+            act.derivativeMat(delta, outputPreActivation, output);
+            PerElementMul(delta, delta, errorIn);
+            effectiveError = delta;
+        }
 
         if (errorOut)
             Clear(errorOut);
@@ -347,47 +370,9 @@ public:
             // Calculate Bias Gradient: Sum errorIn over spatial dims.
             if (bUpdate)
             {
-                SumSpatialDimension(bUpdate, errorIn, oc, Dims3D(oc, 0u, 0u));
+                SumSpatialDimension(bUpdate, effectiveError, oc, Dims3D(oc, 0u, 0u));
             }
-
-            for (uint32_t ic = 0; ic < inChannels; ++ic)
-            {
-                for (uint32_t inY = 0; inY < input->GetDimsY(); ++inY)
-                {
-                    for (uint32_t inX = 0; inX < input->GetDimsX(); ++inX)
-                    {
-                        const T inputValue = input->GetValue(inX, inY, ic);
-                        for (uint32_t ky = 0; ky < kernel->GetDimsY(); ++ky)
-                        {
-                            for (uint32_t kx = 0; kx < kernel->GetDimsX(); ++kx)
-                            {
-                                const int32_t outX = static_cast<int32_t>(inX * stride + kx * dilation) - static_cast<int32_t>(padding);
-                                const int32_t outY = static_cast<int32_t>(inY * stride + ky * dilation) - static_cast<int32_t>(padding);
-                                if (outX < 0 || outY < 0
-                                    || outX >= static_cast<int32_t>(errorIn->GetDimsX())
-                                    || outY >= static_cast<int32_t>(errorIn->GetDimsY()))
-                                {
-                                    continue;
-                                }
-
-                                const T grad = errorIn->GetValue(static_cast<uint32_t>(outX), static_cast<uint32_t>(outY), oc);
-                                if (wUpdate)
-                                {
-                                    T val = wUpdate->GetValue(kx, ky, ic);
-                                    val += inputValue * grad;
-                                    wUpdate->SetValue(kx, ky, ic, val);
-                                }
-                                if (errorOut)
-                                {
-                                    T val = errorOut->GetValue(inX, inY, ic);
-                                    val += kernel->GetValue(kx, ky, ic) * grad;
-                                    errorOut->SetValue(inX, inY, ic, val);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            Conv2DTransposeSingleChannelBackwards<T>(effectiveError, input, kernel, wUpdate, errorOut, oc, stride, dilation, padding);
         }
     }
 };

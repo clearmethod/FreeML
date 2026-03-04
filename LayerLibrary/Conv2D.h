@@ -7,12 +7,27 @@
 #include <MatrixLibrary/GPU/DirectX11/MatrixDX11_Functions.h>
 
 #include "../ToolsLibrary/Tools.h"
+#include <ActivationLibrary/Identity.h>
 
 #include <cmath>
 #include <functional>
+#include <string>
+#include <type_traits>
 #include <utility>
 
 #include "Datablob.h"
+
+struct ConvSettings
+{
+    uint32_t inChannels = 0u;
+    uint32_t outChannels = 0u;
+    Dims3D   kernelSize = Dims3D(1u, 1u, 1u);
+    uint32_t stride = 1u;
+    uint32_t padding = 0u;
+    uint32_t dilation = 1u;
+    bool     useBias = true;
+    std::string activation = "";
+};
 
 template<class T, class Mat = MatrixCPU<T>>
 Datablob<T, Mat>* InitConv2DBlob(   uint32_t       _inChannels,
@@ -61,6 +76,31 @@ Datablob<T, Mat>* InitConv2DBlob(   uint32_t       _inChannels,
     blob->Set("Padding"    , _padding     );
     blob->Set("Dilation"   , _dilation    );
 
+    if (_random)
+    {
+        for (uint32_t i = 0; i < _outChannels; ++i)
+        {
+            Mat* kernel = blob->GetMatrix<Mat>("KernelWeights_" + std::to_string(i));
+            if (kernel)
+            {
+                const float stddev = 0.02f;
+                auto normalGen = std::bind(RandomUtils::random_normal, 0.0f, stddev);
+                MapFunction_Zero(kernel, normalGen);
+            }
+        }
+    }
+    else
+    {
+        for (uint32_t i = 0; i < _outChannels; ++i)
+        {
+            Mat* kernel = blob->GetMatrix<Mat>("KernelWeights_" + std::to_string(i));
+            if (kernel)
+            {
+                Fill(kernel, static_cast<T>(0));
+            }
+        }
+    }
+
     return blob;
 }
 
@@ -68,11 +108,18 @@ template<class T, class ActFunc, class Mat = MatrixCPU<T>>
 class Conv2D : public Layer<T, Mat>
 {
     using MatrixRef = typename MatrixManager<T, Mat>::MatrixRef;
+    static constexpr bool kIsIdentity = std::is_same_v<ActFunc, Identity<T>>;
 
     public:
     virtual std::string GetTypeName() override
     {
         return "Conv2D";
+    }
+
+    virtual std::string GetMetaData() override
+    {
+        ActFunc act;
+        return act.Name();
     }
 
     std::vector<MatrixRef>* GetWeights(Datablob<T, Mat>* _blob) override
@@ -170,12 +217,23 @@ class Conv2D : public Layer<T, Mat>
         auto outputRef = inst.AllocateMatrix({outx, outy, outChannels}, "Output_0");
         _blob->Set("Output_0", outputRef);
 
+        if constexpr (!kIsIdentity)
+        {
+            auto outputPreActivationRef = inst.AllocateMatrix({outx, outy, outChannels}, "OutputPreActivation");
+            _blob->Set("OutputPreActivation", outputPreActivationRef);
+        }
+
         // If we have WUpdate_0, we assume we are training and need to backpropagate error to input
         typename MatrixManager<T, Mat>::MatrixRef wUpdateRef = _blob->AcquireMatrix("WUpdate_0");
         if (wUpdateRef.get() != nullptr)
         {
             auto errorOut = inst.AllocateMatrix({_input->GetDimsX(), _input->GetDimsY(), _input->GetDimsZ()}, "ErrorOut");
             _blob->Set("ErrorOut", errorOut);
+            if constexpr (!kIsIdentity)
+            {
+                auto deltaRef = inst.AllocateMatrix({outx, outy, outChannels}, "Delta");
+                _blob->Set("Delta", deltaRef);
+            }
         }
     }
 
@@ -185,6 +243,8 @@ class Conv2D : public Layer<T, Mat>
         Mat* input = inputRef.get();
         typename MatrixManager<T, Mat>::MatrixRef outputRef = _blob->AcquireMatrix("Output_0");
         Mat* output = outputRef.get();
+        [[maybe_unused]] typename MatrixManager<T, Mat>::MatrixRef outputPreActivationRef = _blob->AcquireMatrix("OutputPreActivation");
+        [[maybe_unused]] Mat* outputPreActivation = outputPreActivationRef.get();
         typename MatrixManager<T, Mat>::MatrixRef biasRef = _blob->AcquireMatrix("Bias");
         Mat* bias = biasRef.get();
 
@@ -193,11 +253,18 @@ class Conv2D : public Layer<T, Mat>
         uint32_t padding     = _blob->GetUInt("Padding");
         uint32_t outChannels = _blob->GetUInt("OutChannels");
 
+        Mat* linearOut = kIsIdentity ? output : outputPreActivation;
         for(uint32_t oc = 0; oc < outChannels; oc++)
         {
             typename MatrixManager<T, Mat>::MatrixRef kernelRef = _blob->AcquireMatrix("KernelWeights_"+std::to_string(oc));
             Mat* kernelWeights = kernelRef.get();
-            Conv2DSingleChannel<T>(output, input, kernelWeights, bias, oc, stride, dilation, padding);
+            Conv2DSingleChannel<T>(linearOut, input, kernelWeights, bias, oc, stride, dilation, padding);
+        }
+
+        if constexpr (!kIsIdentity)
+        {
+            ActFunc act;
+            act.activateMat(output, linearOut, GetGlobalThreadPool());
         }
     }
 
@@ -205,6 +272,12 @@ class Conv2D : public Layer<T, Mat>
     {
         typename MatrixManager<T, Mat>::MatrixRef errorInRef = _blob->AcquireMatrix("ErrorInput_0");
         Mat* errorIn = errorInRef.get();        // Incoming gradient (dL/dY)
+        [[maybe_unused]] typename MatrixManager<T, Mat>::MatrixRef outputPreActivationRef = _blob->AcquireMatrix("OutputPreActivation");
+        [[maybe_unused]] Mat* outputPreActivation = outputPreActivationRef.get();
+        [[maybe_unused]] typename MatrixManager<T, Mat>::MatrixRef outputRef = _blob->AcquireMatrix("Output_0");
+        [[maybe_unused]] Mat* output = outputRef.get();
+        [[maybe_unused]] typename MatrixManager<T, Mat>::MatrixRef deltaRef = _blob->AcquireMatrix("Delta");
+        [[maybe_unused]] Mat* delta = deltaRef.get();
         typename MatrixManager<T, Mat>::MatrixRef inputRef = _blob->AcquireMatrix("Input_0");
         Mat* input = inputRef.get();            // Input (X)
         typename MatrixManager<T, Mat>::MatrixRef errorOutRef = _blob->AcquireMatrix("ErrorOut");
@@ -216,6 +289,15 @@ class Conv2D : public Layer<T, Mat>
         uint32_t dilation    = _blob->GetUInt("Dilation");
         uint32_t padding     = _blob->GetUInt("Padding");
         uint32_t outChannels = _blob->GetUInt("OutChannels");
+
+        Mat* effectiveError = errorIn;
+        if constexpr (!kIsIdentity)
+        {
+            ActFunc act;
+            act.derivativeMat(delta, outputPreActivation, output);
+            PerElementMul(delta, delta, errorIn);
+            effectiveError = delta;
+        }
 
         if(errorOut) 
             Clear(errorOut);
@@ -234,9 +316,9 @@ class Conv2D : public Layer<T, Mat>
             // Calculate Bias Gradient: Sum errorIn over spatial dims
             if(bUpdate)
             {
-                SumSpatialDimension(bUpdate, errorIn, oc, Dims3D(oc, 0u, 0u));
+                SumSpatialDimension(bUpdate, effectiveError, oc, Dims3D(oc, 0u, 0u));
             }
-            Conv2DSingleChannelBackwards<T>(errorIn, input, kernel, wUpdate, errorOut, oc, stride, dilation, padding);
+            Conv2DSingleChannelBackwards<T>(effectiveError, input, kernel, wUpdate, errorOut, oc, stride, dilation, padding);
         }
     }
 };
