@@ -14,5 +14,6 @@
 #include <LayerLibrary/FlattenCopyLayer.h>
 #include <LayerLibrary/LayerNorm.h>
 #include <LayerLibrary/TransformerBlock.h>
+#include <LayerLibrary/UNet.h>
 #include <LayerLibrary/VariationalAutoencoder.h>
 #include <LayerLibrary/VariationalAutoencoder_Decode.h>

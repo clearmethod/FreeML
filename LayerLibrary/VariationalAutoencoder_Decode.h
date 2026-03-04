@@ -13,18 +13,6 @@
 #include <string>
 #include <vector>
 
-struct ConvTransposeSettings
-{
-    uint32_t inChannels = 0u;
-    uint32_t outChannels = 0u;
-    Dims3D   kernelSize = Dims3D(1u, 1u, 1u);
-    uint32_t stride = 1u;
-    uint32_t padding = 0u;
-    uint32_t outputPadding = 0u;
-    uint32_t dilation = 1u;
-    bool     useBias = true;
-};
-
 template<class T, class Mat = MatrixCPU<T>, class ConvTransposeAct = Identity<T>>
 Datablob<T, Mat>* InitVariationalAutoencoderDecodeBlob(std::vector<ConvTransposeSettings>& _convTransposeData,
                                                        bool _initForTraining = true)
@@ -106,8 +94,13 @@ public:
 
         for (uint32_t i = 0; i < layerCount; ++i)
         {
-            Layer<T, Mat>* convTransposeLayer = _blob->GetLayer("ConvTransposeLayer_" + std::to_string(i));
-            Datablob<T, Mat>* convTransposeBlob = _blob->GetBlob("ConvTransposeBlob_" + std::to_string(i));
+            Layer<T, Mat>* convTransposeLayer = nullptr;
+            Datablob<T, Mat>* convTransposeBlob = nullptr;
+            ResolveChildLayerBlob(_blob,
+                                  "ConvTransposeLayer_" + std::to_string(i),
+                                  "ConvTransposeBlob_" + std::to_string(i),
+                                  convTransposeLayer,
+                                  convTransposeBlob);
             if (!convTransposeLayer || !convTransposeBlob)
             {
                 continue;
@@ -145,8 +138,13 @@ public:
 
         for (uint32_t i = 0; i < layerCount; ++i)
         {
-            Layer<T, Mat>* convTransposeLayer = _blob->GetLayer("ConvTransposeLayer_" + std::to_string(i));
-            Datablob<T, Mat>* convTransposeBlob = _blob->GetBlob("ConvTransposeBlob_" + std::to_string(i));
+            Layer<T, Mat>* convTransposeLayer = nullptr;
+            Datablob<T, Mat>* convTransposeBlob = nullptr;
+            ResolveChildLayerBlob(_blob,
+                                  "ConvTransposeLayer_" + std::to_string(i),
+                                  "ConvTransposeBlob_" + std::to_string(i),
+                                  convTransposeLayer,
+                                  convTransposeBlob);
             if (!convTransposeLayer || !convTransposeBlob)
             {
                 continue;
@@ -182,8 +180,14 @@ public:
         const uint32_t layerCount = _blob->GetUInt("LayerCount");
         for (int32_t i = static_cast<int32_t>(layerCount) - 1; i >= 0; --i)
         {
-            Layer<T, Mat>* convTransposeLayer = _blob->GetLayer("ConvTransposeLayer_" + std::to_string(static_cast<uint32_t>(i)));
-            Datablob<T, Mat>* convTransposeBlob = _blob->GetBlob("ConvTransposeBlob_" + std::to_string(static_cast<uint32_t>(i)));
+            Layer<T, Mat>* convTransposeLayer = nullptr;
+            Datablob<T, Mat>* convTransposeBlob = nullptr;
+            const std::string index = std::to_string(static_cast<uint32_t>(i));
+            ResolveChildLayerBlob(_blob,
+                                  "ConvTransposeLayer_" + index,
+                                  "ConvTransposeBlob_" + index,
+                                  convTransposeLayer,
+                                  convTransposeBlob);
             if (!convTransposeLayer || !convTransposeBlob)
             {
                 continue;
@@ -203,14 +207,59 @@ public:
         }
     }
 
+    virtual void GetSublayerPairs(std::vector<typename Layer<T, Mat>::sublayerinfo>& _out,
+                                  Datablob<T, Mat>* _blob) override
+    {
+        const uint32_t layerCount = _blob->GetUInt("LayerCount");
+        for (uint32_t i = 0; i < layerCount; ++i)
+        {
+            Layer<T, Mat>* convTransposeLayer = nullptr;
+            Datablob<T, Mat>* convTransposeBlob = nullptr;
+            ResolveChildLayerBlob(_blob,
+                                  "ConvTransposeLayer_" + std::to_string(i),
+                                  "ConvTransposeBlob_" + std::to_string(i),
+                                  convTransposeLayer,
+                                  convTransposeBlob);
+            if (convTransposeLayer && convTransposeBlob)
+            {
+                _out.push_back(typename Layer<T, Mat>::sublayerinfo{
+                    "ConvTransposeLayer_" + std::to_string(i), convTransposeLayer, convTransposeBlob});
+            }
+        }
+    }
+
 private:
+    static void ResolveChildLayerBlob(Datablob<T, Mat>* _blob,
+                                      const std::string& _layerKey,
+                                      const std::string& _blobKey,
+                                      Layer<T, Mat>*& _layerOut,
+                                      Datablob<T, Mat>*& _blobOut)
+    {
+        _layerOut = _blob ? _blob->GetLayer(_layerKey) : nullptr;
+        if (!_layerOut && _blob)
+        {
+            _layerOut = _blob->GetLayer(_blobKey);
+        }
+
+        _blobOut = _blob ? _blob->GetBlob(_blobKey) : nullptr;
+        if (!_blobOut && _blob)
+        {
+            _blobOut = _blob->GetBlob(_layerKey);
+        }
+    }
+
     void AppendLayerWeights(Datablob<T, Mat>* _blob, std::vector<MatrixRef>& _out)
     {
         const uint32_t layerCount = _blob->GetUInt("LayerCount");
         for (uint32_t i = 0; i < layerCount; ++i)
         {
-            Layer<T, Mat>* convTransposeLayer = _blob->GetLayer("ConvTransposeLayer_" + std::to_string(i));
-            Datablob<T, Mat>* convTransposeBlob = _blob->GetBlob("ConvTransposeBlob_" + std::to_string(i));
+            Layer<T, Mat>* convTransposeLayer = nullptr;
+            Datablob<T, Mat>* convTransposeBlob = nullptr;
+            ResolveChildLayerBlob(_blob,
+                                  "ConvTransposeLayer_" + std::to_string(i),
+                                  "ConvTransposeBlob_" + std::to_string(i),
+                                  convTransposeLayer,
+                                  convTransposeBlob);
             if (!convTransposeLayer || !convTransposeBlob)
             {
                 continue;
@@ -230,8 +279,13 @@ private:
         const uint32_t layerCount = _blob->GetUInt("LayerCount");
         for (uint32_t i = 0; i < layerCount; ++i)
         {
-            Layer<T, Mat>* convTransposeLayer = _blob->GetLayer("ConvTransposeLayer_" + std::to_string(i));
-            Datablob<T, Mat>* convTransposeBlob = _blob->GetBlob("ConvTransposeBlob_" + std::to_string(i));
+            Layer<T, Mat>* convTransposeLayer = nullptr;
+            Datablob<T, Mat>* convTransposeBlob = nullptr;
+            ResolveChildLayerBlob(_blob,
+                                  "ConvTransposeLayer_" + std::to_string(i),
+                                  "ConvTransposeBlob_" + std::to_string(i),
+                                  convTransposeLayer,
+                                  convTransposeBlob);
             if (!convTransposeLayer || !convTransposeBlob)
             {
                 continue;
