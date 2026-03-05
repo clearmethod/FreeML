@@ -47,9 +47,9 @@ public:
     {
         if (_index == 0u)
         {
-            return _blob->AcquireMatrix("ErrorOut_0");
+            return _blob->AcquireMatrix("ErrorOutput_0");
         }
-        return _blob->AcquireMatrix("ErrorOut_1");
+        return _blob->AcquireMatrix("ErrorOutput_1");
     }
 
     MatrixRef GetOutput(Datablob<T, Mat>* _blob, uint32_t _index = 0) override
@@ -94,7 +94,7 @@ public:
 
         if (_blob->GetUInt("TrainingEnabled") > 0u)
         {
-            typename MatrixManager<T, Mat>::MatrixRef err0Ref = _blob->AcquireMatrix("ErrorOut_0");
+            typename MatrixManager<T, Mat>::MatrixRef err0Ref = _blob->AcquireMatrix("ErrorOutput_0");
             Mat* err0 = err0Ref.get();
             const bool err0Mismatch = !err0
                                       || err0->GetDimsX() != input0->GetDimsX()
@@ -106,11 +106,11 @@ public:
                 {
                     inst.RemoveMatrix(err0);
                 }
-                auto err0RefNew = inst.AllocateMatrix(input0->GetDims(), "ErrorOut_0");
-                _blob->Set("ErrorOut_0", err0RefNew);
+                auto err0RefNew = inst.AllocateMatrix(input0->GetDims(), "ErrorOutput_0");
+                _blob->Set("ErrorOutput_0", err0RefNew);
             }
 
-            typename MatrixManager<T, Mat>::MatrixRef err1Ref = _blob->AcquireMatrix("ErrorOut_1");
+            typename MatrixManager<T, Mat>::MatrixRef err1Ref = _blob->AcquireMatrix("ErrorOutput_1");
             Mat* err1 = err1Ref.get();
             const bool err1Mismatch = !err1
                                       || err1->GetDimsX() != input1->GetDimsX()
@@ -122,8 +122,8 @@ public:
                 {
                     inst.RemoveMatrix(err1);
                 }
-                auto err1RefNew = inst.AllocateMatrix(input1->GetDims(), "ErrorOut_1");
-                _blob->Set("ErrorOut_1", err1RefNew);
+                auto err1RefNew = inst.AllocateMatrix(input1->GetDims(), "ErrorOutput_1");
+                _blob->Set("ErrorOutput_1", err1RefNew);
             }
         }
     }
@@ -169,9 +169,9 @@ public:
     {
         typename MatrixManager<T, Mat>::MatrixRef errorInRef = _blob->AcquireMatrix("ErrorInput_0");
         Mat* errorIn = errorInRef.get();
-        typename MatrixManager<T, Mat>::MatrixRef errorOut0Ref = _blob->AcquireMatrix("ErrorOut_0");
+        typename MatrixManager<T, Mat>::MatrixRef errorOut0Ref = _blob->AcquireMatrix("ErrorOutput_0");
         Mat* errorOut0 = errorOut0Ref.get();
-        typename MatrixManager<T, Mat>::MatrixRef errorOut1Ref = _blob->AcquireMatrix("ErrorOut_1");
+        typename MatrixManager<T, Mat>::MatrixRef errorOut1Ref = _blob->AcquireMatrix("ErrorOutput_1");
         Mat* errorOut1 = errorOut1Ref.get();
         typename MatrixManager<T, Mat>::MatrixRef input0Ref = _blob->AcquireMatrix("Input_0");
         Mat* input0 = input0Ref.get();

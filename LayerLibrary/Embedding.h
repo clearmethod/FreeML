@@ -94,11 +94,6 @@ public:
         return &this->m_gradientMatrices;
     }
 
-    uint32_t GetOutputErrorCount() override
-    {
-        return 1u;
-    }
-
     MatrixRef GetOutputError(Datablob<T, Mat>* _blob, uint32_t _index = 0) override
     {
         return _blob->AcquireMatrix("Embedding_ErrorOut");

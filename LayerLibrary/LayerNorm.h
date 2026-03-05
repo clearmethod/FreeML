@@ -70,7 +70,7 @@ class LayerNorm : public Layer<T, Mat>
 
     MatrixRef GetOutputError(Datablob<T, Mat>* _blob, uint32_t _index = 0) override
     {
-        return _blob->AcquireMatrix("ErrorOut");
+        return _blob->AcquireMatrix("ErrorOutput_0");
     }
 
     MatrixRef GetOutput(Datablob<T, Mat>* _blob, uint32_t _index = 0) override
@@ -98,7 +98,7 @@ class LayerNorm : public Layer<T, Mat>
         if (_blob->GetUInt("TrainingEnabled") > 0u)
         {
             this->EnsureMatrix(_blob, "XHat", input->GetDimsX(), input->GetDimsY(), input->GetDimsZ());
-            this->EnsureMatrix(_blob, "ErrorOut", input->GetDimsX(), input->GetDimsY(), input->GetDimsZ());
+            this->EnsureMatrix(_blob, "ErrorOutput_0", input->GetDimsX(), input->GetDimsY(), input->GetDimsZ());
         }
     }
 
@@ -129,8 +129,8 @@ class LayerNorm : public Layer<T, Mat>
             auto xHat = inst.AllocateMatrix(_input->GetDims(), "XHat");
             _blob->Set("XHat", xHat);
 
-            auto outputErr = inst.AllocateMatrix(_input->GetDims(), "ErrorOut");
-            _blob->Set("ErrorOut", outputErr);
+            auto outputErr = inst.AllocateMatrix(_input->GetDims(), "ErrorOutput_0");
+            _blob->Set("ErrorOutput_0", outputErr);
 
             auto gScaleGrad = inst.AllocateMatrix({_input->GetDimsX(), 1u}, "GammaScale_Grad");
             _blob->Set("GammaScale_Grad", gScaleGrad);
@@ -168,7 +168,7 @@ class LayerNorm : public Layer<T, Mat>
     {
         typename MatrixManager<T, Mat>::MatrixRef errorRef = _blob->AcquireMatrix("ErrorInput_0");
         Mat* error = errorRef.get();
-        typename MatrixManager<T, Mat>::MatrixRef errorOutRef = _blob->AcquireMatrix("ErrorOut");
+        typename MatrixManager<T, Mat>::MatrixRef errorOutRef = _blob->AcquireMatrix("ErrorOutput_0");
         Mat* errorOut = errorOutRef.get();
         typename MatrixManager<T, Mat>::MatrixRef lastInputRef = _blob->AcquireMatrix("Input_0");
         Mat* lastInput = lastInputRef.get();

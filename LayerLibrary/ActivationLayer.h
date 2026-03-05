@@ -51,7 +51,7 @@ class ActivationLayer : public Layer<T, Mat>
 
     MatrixRef GetOutputError(Datablob<T, Mat>* _blob, uint32_t _index = 0) override
     {
-        return _blob->AcquireMatrix("ErrorOut");
+        return _blob->AcquireMatrix("ErrorOutput_0");
     }
 
     MatrixRef GetOutput(Datablob<T, Mat>* _blob, uint32_t _index = 0) override
@@ -80,7 +80,7 @@ class ActivationLayer : public Layer<T, Mat>
 
         typename MatrixManager<T, Mat>::MatrixRef outputRef = _blob->AcquireMatrix("Output_0");
         Mat* output = outputRef.get();
-        typename MatrixManager<T, Mat>::MatrixRef errorOutRef = _blob->AcquireMatrix("ErrorOut");
+        typename MatrixManager<T, Mat>::MatrixRef errorOutRef = _blob->AcquireMatrix("ErrorOutput_0");
         Mat* errorOut = errorOutRef.get();
         assert(output);
         assert(errorOut);

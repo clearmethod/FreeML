@@ -152,7 +152,7 @@ class CausalSelfAttentionLayer : public Layer<T, Mat>
 
     MatrixRef GetOutputError(Datablob<T, Mat>* _blob, uint32_t _index = 0) override
     {
-        return _blob->AcquireMatrix("ErrorOut");
+        return _blob->AcquireMatrix("ErrorOutput_0");
     }
 
     MatrixRef GetOutput(Datablob<T, Mat>* _blob, uint32_t _index = 0) override
