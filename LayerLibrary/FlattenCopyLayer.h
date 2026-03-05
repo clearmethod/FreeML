@@ -36,7 +36,7 @@ class FlattenCopyLayer : public Layer<T, Mat>
 
     MatrixRef GetOutputError(Datablob<T, Mat>* _blob, uint32_t _index = 0) override
     {
-        return _blob->AcquireMatrix("ErrorOut");
+        return _blob->AcquireMatrix("ErrorOutput_0");
     }
 
     void EnsureOutputsAllocated(Datablob<T, Mat>* _blob) override
@@ -70,7 +70,7 @@ class FlattenCopyLayer : public Layer<T, Mat>
 
         if (_blob->GetUInt("TrainingEnabled") > 0u)
         {
-            typename MatrixManager<T, Mat>::MatrixRef errRef = _blob->AcquireMatrix("ErrorOut");
+            typename MatrixManager<T, Mat>::MatrixRef errRef = _blob->AcquireMatrix("ErrorOutput_0");
             Mat* errorOut = errRef.get();
             const bool errMismatch = !errorOut
                                      || errorOut->GetDimsX() != input->GetDimsX()
@@ -84,7 +84,7 @@ class FlattenCopyLayer : public Layer<T, Mat>
                 }
                 auto errorRefNew = inst.AllocateMatrix({input->GetDimsX(), input->GetDimsY(), input->GetDimsZ()},
                     "Flatten_ErrorOut");
-                _blob->Set("ErrorOut", errorRefNew);
+                _blob->Set("ErrorOutput_0", errorRefNew);
             }
         }
     }
@@ -103,7 +103,7 @@ class FlattenCopyLayer : public Layer<T, Mat>
     {
         typename MatrixManager<T, Mat>::MatrixRef errorRef = _blob->AcquireMatrix("ErrorInput_0");
         Mat* error = errorRef.get();
-        typename MatrixManager<T, Mat>::MatrixRef errorOutRef = _blob->AcquireMatrix("ErrorOut");
+        typename MatrixManager<T, Mat>::MatrixRef errorOutRef = _blob->AcquireMatrix("ErrorOutput_0");
         Mat* errorOut = errorOutRef.get();
 
         Copy(errorOut, error);

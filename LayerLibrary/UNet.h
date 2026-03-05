@@ -197,7 +197,7 @@ public:
 
     MatrixRef GetOutputError(Datablob<T, Mat>* _blob, uint32_t _index = 0) override
     {
-        return _blob->AcquireMatrix("ErrorOut");
+        return _blob->AcquireMatrix("ErrorOutput_0");
     }
 
     MatrixRef GetOutput(Datablob<T, Mat>* _blob, uint32_t _index = 0) override
@@ -297,7 +297,7 @@ public:
         }
 
         // ErrorOut: error propagated to the input
-        this->EnsureMatrix(_blob, "ErrorOut",
+        this->EnsureMatrix(_blob, "ErrorOutput_0",
                            input->GetDimsX(), input->GetDimsY(), input->GetDimsZ());
     }
 
@@ -489,7 +489,7 @@ public:
         }
 
         // Copy final error to ErrorOut
-        MatrixRef errorOutRef = _blob->AcquireMatrix("ErrorOut");
+        MatrixRef errorOutRef = _blob->AcquireMatrix("ErrorOutput_0");
         if (errorOutRef.get() && currentErrRef.get())
         {
             Copy(errorOutRef.get(), currentErrRef.get());

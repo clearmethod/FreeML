@@ -69,7 +69,7 @@ Datablob<T, Mat>* InitDenseBlob(     uint32_t       _dimsX,
         blob->Set("Dense_LinearOut", linearOut);
         blob->Set("Dense_Delta"    , delta);
         blob->Set("Dense_WUpdate"  , wUpdate);
-        blob->Set("ErrorOut" , errorOut);
+        blob->Set("ErrorOutput_0" , errorOut);
     }
 
     if (_random)
@@ -162,7 +162,7 @@ class Dense : public Layer<T, Mat>
 
     MatrixRef GetOutputError(Datablob<T, Mat>* _blob, uint32_t _index = 0) override
     {
-        return _blob->AcquireMatrix("ErrorOut");
+        return _blob->AcquireMatrix("ErrorOutput_0");
     }
 
     MatrixRef GetOutput(Datablob<T, Mat>* _blob, uint32_t _index = 0) override
@@ -236,7 +236,7 @@ class Dense : public Layer<T, Mat>
         Mat* linearOut = linearOutRef.get();
         typename MatrixManager<T, Mat>::MatrixRef deltaRef = _blob->AcquireMatrix("Dense_Delta");
         Mat* delta = deltaRef.get();
-        typename MatrixManager<T, Mat>::MatrixRef errorOutRef = _blob->AcquireMatrix("ErrorOut");
+        typename MatrixManager<T, Mat>::MatrixRef errorOutRef = _blob->AcquireMatrix("ErrorOutput_0");
         Mat* errorOut = errorOutRef.get();
         typename MatrixManager<T, Mat>::MatrixRef bUpdateRef = _blob->AcquireMatrix("Dense_BUpdate");
         Mat* bUpdate = bUpdateRef.get();

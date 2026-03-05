@@ -165,7 +165,7 @@ class Conv2D : public Layer<T, Mat>
 
     MatrixRef GetOutputError(Datablob<T, Mat>* _blob, uint32_t _index = 0) override
     {
-        return _blob->AcquireMatrix("ErrorOut");
+        return _blob->AcquireMatrix("ErrorOutput_0");
     }
 
     MatrixRef GetOutput(Datablob<T, Mat>* _blob, uint32_t _index = 0) override
@@ -227,8 +227,8 @@ class Conv2D : public Layer<T, Mat>
         typename MatrixManager<T, Mat>::MatrixRef wUpdateRef = _blob->AcquireMatrix("WUpdate_0");
         if (wUpdateRef.get() != nullptr)
         {
-            auto errorOut = inst.AllocateMatrix({_input->GetDimsX(), _input->GetDimsY(), _input->GetDimsZ()}, "ErrorOut");
-            _blob->Set("ErrorOut", errorOut);
+            auto errorOut = inst.AllocateMatrix({_input->GetDimsX(), _input->GetDimsY(), _input->GetDimsZ()}, "ErrorOutput_0");
+            _blob->Set("ErrorOutput_0", errorOut);
             if constexpr (!kIsIdentity)
             {
                 auto deltaRef = inst.AllocateMatrix({outx, outy, outChannels}, "Delta");
@@ -280,7 +280,7 @@ class Conv2D : public Layer<T, Mat>
         [[maybe_unused]] Mat* delta = deltaRef.get();
         typename MatrixManager<T, Mat>::MatrixRef inputRef = _blob->AcquireMatrix("Input_0");
         Mat* input = inputRef.get();            // Input (X)
-        typename MatrixManager<T, Mat>::MatrixRef errorOutRef = _blob->AcquireMatrix("ErrorOut");
+        typename MatrixManager<T, Mat>::MatrixRef errorOutRef = _blob->AcquireMatrix("ErrorOutput_0");
         Mat* errorOut = errorOutRef.get();      // Outgoing gradient (dL/dX)
         typename MatrixManager<T, Mat>::MatrixRef bUpdateRef = _blob->AcquireMatrix("BUpdate");
         Mat* bUpdate = bUpdateRef.get();        // Bias gradient

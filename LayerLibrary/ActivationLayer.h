@@ -25,8 +25,8 @@ Datablob<T, Mat>* InitActivationBlob(  Dims3D         _dims,
     blob->Set("Output_0", output);
     if(_initForTraining)
     {
-        auto errorOut = inst.AllocateMatrix(_dims, "errorOut");
-        blob->Set("ErrorOut", errorOut);
+        auto errorOut = inst.AllocateMatrix(_dims, "ErrorOutput_0");
+        blob->Set("ErrorOutput_0", errorOut);
     }
 
     return blob;

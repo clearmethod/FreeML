@@ -186,7 +186,7 @@ public:
 
     MatrixRef GetOutputError(Datablob<T, Mat>* _blob, uint32_t _index = 0) override
     {
-        return _blob->AcquireMatrix("ErrorOut");
+        return _blob->AcquireMatrix("ErrorOutput_0");
     }
 
     MatrixRef GetOutput(Datablob<T, Mat>* _blob, uint32_t _index = 0) override
@@ -258,8 +258,8 @@ public:
         MatrixRef wUpdateRef = _blob->AcquireMatrix("WUpdate_0");
         if (wUpdateRef.get() != nullptr)
         {
-            auto errorOut = inst.AllocateMatrix({_input->GetDimsX(), _input->GetDimsY(), _input->GetDimsZ()}, "ErrorOut");
-            _blob->Set("ErrorOut", errorOut);
+            auto errorOut = inst.AllocateMatrix({_input->GetDimsX(), _input->GetDimsY(), _input->GetDimsZ()}, "ErrorOutput_0");
+            _blob->Set("ErrorOutput_0", errorOut);
             if constexpr (!kIsIdentity)
             {
                 auto deltaRef = inst.AllocateMatrix({outx, outy, outChannels}, "Delta");
@@ -323,7 +323,7 @@ public:
         [[maybe_unused]] Mat* delta = deltaRef.get();
         MatrixRef inputRef = _blob->AcquireMatrix("Input_0");
         Mat* input = inputRef.get();            // Input (X)
-        MatrixRef errorOutRef = _blob->AcquireMatrix("ErrorOut");
+        MatrixRef errorOutRef = _blob->AcquireMatrix("ErrorOutput_0");
         Mat* errorOut = errorOutRef.get();      // Outgoing gradient (dL/dX)
         MatrixRef bUpdateRef = _blob->AcquireMatrix("BUpdate");
         Mat* bUpdate = bUpdateRef.get();        // Bias gradient

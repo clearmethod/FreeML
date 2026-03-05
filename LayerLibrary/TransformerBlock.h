@@ -162,7 +162,7 @@ class TransformerBlockLayer : public Layer<T, Mat>
 
     MatrixRef GetOutputError(Datablob<T, Mat>* _blob, uint32_t _index = 0) override
     {
-        return _blob->AcquireMatrix("ErrorOut");
+        return _blob->AcquireMatrix("ErrorOutput_0");
     }
 
     MatrixRef GetOutput(Datablob<T, Mat>* _blob, uint32_t _index = 0) override
@@ -216,7 +216,7 @@ class TransformerBlockLayer : public Layer<T, Mat>
         this->EnsureMatrix(_blob, "Buffer_0", input->GetDimsX(), input->GetDimsY(), input->GetDimsZ());
         if (_blob->GetUInt("TrainingEnabled") > 0u)
         {
-            this->EnsureMatrix(_blob, "ErrorOut", input->GetDimsX(), input->GetDimsY(), input->GetDimsZ());
+            this->EnsureMatrix(_blob, "ErrorOutput_0", input->GetDimsX(), input->GetDimsY(), input->GetDimsZ());
         }
 
         auto* layerNorm0Data = _blob->GetBlob("LayerNorm0Data");
@@ -347,8 +347,8 @@ class TransformerBlockLayer : public Layer<T, Mat>
 
         if(_blob->GetUInt("TrainingEnabled") > 0u)
         {
-            auto outputErr = inst.AllocateMatrix({_input->GetDimsX(), _input->GetDimsY(), _input->GetDimsZ()}, "ErrorOut");
-            _blob->Set("ErrorOut", outputErr);
+            auto outputErr = inst.AllocateMatrix({_input->GetDimsX(), _input->GetDimsY(), _input->GetDimsZ()}, "ErrorOutput_0");
+            _blob->Set("ErrorOutput_0", outputErr);
         }
     }
 
@@ -404,7 +404,7 @@ class TransformerBlockLayer : public Layer<T, Mat>
     {
         typename MatrixManager<T, Mat>::MatrixRef errorRef     = _blob->AcquireMatrix("ErrorInput_0");
         Mat* error = errorRef.get();
-        typename MatrixManager<T, Mat>::MatrixRef errorOutRef  = _blob->AcquireMatrix("ErrorOut");
+        typename MatrixManager<T, Mat>::MatrixRef errorOutRef  = _blob->AcquireMatrix("ErrorOutput_0");
         Mat* errorOut = errorOutRef.get();
         typename MatrixManager<T, Mat>::MatrixRef lastInputRef = _blob->AcquireMatrix("Input_0");
         Mat* lastInput = lastInputRef.get();

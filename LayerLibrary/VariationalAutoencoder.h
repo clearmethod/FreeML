@@ -107,7 +107,7 @@ public:
 
     MatrixRef GetOutputError(Datablob<T, Mat>* _blob, uint32_t _index = 0) override
     {
-        return _blob->AcquireMatrix("ErrorOut");
+        return _blob->AcquireMatrix("ErrorOutput_0");
     }
 
     MatrixRef GetOutput(Datablob<T, Mat>* _blob, uint32_t _index = 0) override
@@ -190,7 +190,7 @@ public:
         this->EnsureMatrix(_blob, "LogVarGrad",      muRef->GetDimsX(), muRef->GetDimsY(), muRef->GetDimsZ());
         this->EnsureMatrix(_blob, "HiddenGrad",      nextInput->GetDimsX(), nextInput->GetDimsY(), nextInput->GetDimsZ());
 
-        this->EnsureMatrix(_blob, "ErrorOut", input->GetDimsX(), input->GetDimsY(), input->GetDimsZ());
+        this->EnsureMatrix(_blob, "ErrorOutput_0", input->GetDimsX(), input->GetDimsY(), input->GetDimsZ());
     }
 
     void Forward(Datablob<T, Mat>* _blob) override
@@ -356,7 +356,7 @@ public:
             nextError  = nextErrRef.get();
         }
 
-        MatrixRef errorOutRef = _blob->AcquireMatrix("ErrorOut");
+        MatrixRef errorOutRef = _blob->AcquireMatrix("ErrorOutput_0");
         Mat* errorOut = errorOutRef.get();
         if (errorOut && nextError)
         {

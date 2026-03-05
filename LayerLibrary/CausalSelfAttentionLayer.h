@@ -221,7 +221,7 @@ class CausalSelfAttentionLayer : public Layer<T, Mat>
 
         if (initForTraining)
         {
-            typename MatrixManager<T, Mat>::MatrixRef outputErrRef = _blob->AcquireMatrix("ErrorOut");
+            typename MatrixManager<T, Mat>::MatrixRef outputErrRef = _blob->AcquireMatrix("ErrorOutput_0");
             Mat* outputErr = outputErrRef.get();
             const bool errMismatch = !outputErr
                 || outputErr->GetDimsX() != input->GetDimsX()
@@ -233,8 +233,8 @@ class CausalSelfAttentionLayer : public Layer<T, Mat>
                 {
                     inst.RemoveMatrix(outputErr);
                 }
-                auto outputErrRefNew = inst.AllocateMatrix({input->GetDimsX(), input->GetDimsY(), input->GetDimsZ()}, "ErrorOut");
-                _blob->Set("ErrorOut", outputErrRefNew);
+                auto outputErrRefNew = inst.AllocateMatrix({input->GetDimsX(), input->GetDimsY(), input->GetDimsZ()}, "ErrorOutput_0");
+                _blob->Set("ErrorOutput_0", outputErrRefNew);
             }
         }
 
@@ -280,7 +280,7 @@ class CausalSelfAttentionLayer : public Layer<T, Mat>
                 if (attentionDropoutBlob->GetUInt("TrainingEnabled") > 0u)
                 {
                     this->EnsureMatrix(attentionDropoutBlob, "Mask", attRows, attRows, dims.B_batch);
-                    this->EnsureMatrix(attentionDropoutBlob, "ErrorOut", attRows, attRows, dims.B_batch);
+                    this->EnsureMatrix(attentionDropoutBlob, "ErrorOutput_0", attRows, attRows, dims.B_batch);
                 }
             }
 
@@ -296,7 +296,7 @@ class CausalSelfAttentionLayer : public Layer<T, Mat>
             if (residualDropoutBlob->GetUInt("TrainingEnabled") > 0u)
             {
                 this->EnsureMatrix(residualDropoutBlob, "Mask", dims.C_EmbedDims, dims.T_block_size, dims.B_batch);
-                this->EnsureMatrix(residualDropoutBlob, "ErrorOut", dims.C_EmbedDims, dims.T_block_size, dims.B_batch);
+                this->EnsureMatrix(residualDropoutBlob, "ErrorOutput_0", dims.C_EmbedDims, dims.T_block_size, dims.B_batch);
             }
         }
 
@@ -363,8 +363,8 @@ class CausalSelfAttentionLayer : public Layer<T, Mat>
 
         if(_blob->GetUInt("TrainingEnabled") > 0u)
         {
-            auto outputErr = inst.AllocateMatrix({_input->GetDimsX(), _input->GetDimsY(), _input->GetDimsZ()}, "ErrorOut");
-            _blob->Set("ErrorOut", outputErr);
+            auto outputErr = inst.AllocateMatrix({_input->GetDimsX(), _input->GetDimsY(), _input->GetDimsZ()}, "ErrorOutput_0");
+            _blob->Set("ErrorOutput_0", outputErr);
         }
     }
 
@@ -518,7 +518,7 @@ class CausalSelfAttentionLayer : public Layer<T, Mat>
         // Get all the variables together.
         auto errorRef      = _blob->AcquireMatrix("ErrorInput_0");
         Mat* error         = errorRef.get();
-        auto errorOutRef   = _blob->AcquireMatrix("ErrorOut");
+        auto errorOutRef   = _blob->AcquireMatrix("ErrorOutput_0");
         Mat* errorOut      = errorOutRef.get();
         auto lastInputRef  = _blob->AcquireMatrix("Input_0");
         Mat* lastInput     = lastInputRef.get();
