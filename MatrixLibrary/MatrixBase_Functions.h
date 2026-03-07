@@ -10,18 +10,6 @@
 #include <vector>
 #include <cmath>
 
-// Functions implemented here
-// Add
-// Add (Broadcast)
-// Sub
-// Mul
-// Mul (Per Element)
-// Map Functions
-// Scale
-// Fill
-// Min/Max
-// Sum Columns
-
 template<class T>
 T MeanSquaredErrorLoss(MatrixBase<T>* target, MatrixBase<T>* prediction)
 {
