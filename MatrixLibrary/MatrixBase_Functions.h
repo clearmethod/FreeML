@@ -6,6 +6,7 @@
 #include <latch>
 #include <cassert>
 #include <cstring>
+#include <random>
 #include <vector>
 #include <cmath>
 
@@ -1568,6 +1569,63 @@ void AdamUpdate(MatrixBase<T>* param,
                 T(0));
 }
 
+
+// VAE reparameterization backward pass.
+// Computes gradients for both the mu and logvar heads given the upstream gradient dz,
+// the saved mu, logvar, eps from the forward pass, and the KL weight:
+//
+//   muGrad[i]  = dz[i] - kl_weight * mu[i]
+//   lvGrad[i]  = dz[i] * eps[i] * 0.5 * sigma  -  kl_weight * 0.5 * (sigma^2 - 1)
+//
+// where  lv = clamp(logvar[i], -10, 4)  and  sigma = exp(0.5 * lv).
+template<class T>
+void ReparameterizeBackwardsMat(MatrixBase<T>* _muGrad,  MatrixBase<T>* _lvGrad,
+                                MatrixBase<T>* _dz,     MatrixBase<T>* _mu,
+                                MatrixBase<T>* _logvar, MatrixBase<T>* _eps,
+                                float _klWeight)
+{
+    assert(_muGrad && _lvGrad && _dz && _mu && _logvar && _eps);
+    const size_t n       = _dz->GetElementCount();
+    const T* dz          = _dz->DataRead();
+    const T* muData      = _mu->DataRead();
+    const T* lvData      = _logvar->DataRead();
+    const T* epsData     = _eps->DataRead();
+    T* muGrad            = _muGrad->DataWrite();
+    T* lvGrad            = _lvGrad->DataWrite();
+    for (size_t i = 0; i < n; ++i)
+    {
+        const float lv    = std::max(-10.0f, std::min(4.0f, static_cast<float>(lvData[i])));
+        const float sigma = std::exp(0.5f * lv);
+        muGrad[i] = dz[i] - static_cast<T>(_klWeight * static_cast<float>(muData[i]));
+        lvGrad[i] = static_cast<T>(
+            static_cast<float>(dz[i]) * static_cast<float>(epsData[i]) * 0.5f * sigma
+            - _klWeight * 0.5f * (sigma * sigma - 1.0f));
+    }
+}
+
+// Reparameterization trick: z = mu + exp(0.5 * clamp(logvar, -10, 4)) * eps,  eps ~ N(0,I).
+// Writes both _latent (z) and _eps so the backward pass can reuse eps without re-sampling.
+template<class T>
+void ReparameterizeMat(MatrixBase<T>* _latent, MatrixBase<T>* _eps,
+                       MatrixBase<T>* _mu,     MatrixBase<T>* _logvar)
+{
+    assert(_latent && _eps && _mu && _logvar);
+    thread_local std::mt19937 s_rng{std::random_device{}()};
+    std::normal_distribution<float> dist(0.0f, 1.0f);
+    const size_t n       = _mu->GetElementCount();
+    const T* muData      = _mu->DataRead();
+    const T* lvData      = _logvar->DataRead();
+    T* latentData        = _latent->DataWrite();
+    T* epsData           = _eps->DataWrite();
+    for (size_t i = 0; i < n; ++i)
+    {
+        const float e     = dist(s_rng);
+        const float lv    = std::max(-10.0f, std::min(4.0f, static_cast<float>(lvData[i])));
+        const float sigma = std::exp(0.5f * lv);
+        epsData[i]    = static_cast<T>(e);
+        latentData[i] = muData[i] + static_cast<T>(sigma * e);
+    }
+}
 
 #include "MatrixBase_Mul.h"
 

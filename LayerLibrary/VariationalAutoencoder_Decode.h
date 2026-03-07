@@ -127,14 +127,10 @@ public:
     {
         MatrixRef inputRef = _blob->AcquireMatrix("Input_0");
         Mat* input = inputRef.get();
-        if (!input)
-        {
-            return;
-        }
 
-        MatrixRef nextRef = inputRef;
-        Mat* nextInput = input;
-        const uint32_t layerCount = _blob->GetUInt("LayerCount");
+        MatrixRef       nextRef     = inputRef;
+        Mat*            nextInput   = input;
+        const uint32_t  layerCount  = _blob->GetUInt("LayerCount");
 
         for (uint32_t i = 0; i < layerCount; ++i)
         {
@@ -145,34 +141,21 @@ public:
                                   "ConvTransposeBlob_" + std::to_string(i),
                                   convTransposeLayer,
                                   convTransposeBlob);
-            if (!convTransposeLayer || !convTransposeBlob)
-            {
-                continue;
-            }
 
             convTransposeLayer->SetInput(convTransposeBlob, nextInput);
             convTransposeLayer->Forward(convTransposeBlob);
             nextRef = convTransposeLayer->GetOutput(convTransposeBlob, 0u);
-            if (nextRef.get())
-            {
-                nextInput = nextRef.get();
-            }
+            
+            nextInput = nextRef.get();
         }
 
-        if (nextRef.get())
-        {
-            _blob->Set("Output_0", nextRef);
-        }
+        _blob->Set("Output_0", nextRef);
     }
 
     void Backwards(Datablob<T, Mat>* _blob) override
     {
         MatrixRef errorInRef = _blob->AcquireMatrix("ErrorInput_0");
         Mat* errorIn = errorInRef.get();
-        if (!errorIn)
-        {
-            return;
-        }
 
         MatrixRef nextErrRef = errorInRef;
         Mat* nextError = errorIn;
@@ -188,10 +171,6 @@ public:
                                   "ConvTransposeBlob_" + index,
                                   convTransposeLayer,
                                   convTransposeBlob);
-            if (!convTransposeLayer || !convTransposeBlob)
-            {
-                continue;
-            }
 
             convTransposeBlob->Set("ErrorInput_0", nextErrRef);
             convTransposeLayer->Backwards(convTransposeBlob);
@@ -200,11 +179,8 @@ public:
         }
 
         MatrixRef errorOutRef = _blob->AcquireMatrix("ErrorOutput_0");
-        Mat* errorOut = errorOutRef.get();
-        if (errorOut && nextError)
-        {
-            Copy(errorOut, nextError);
-        }
+        Mat*      errorOut    = errorOutRef.get();
+        Copy(errorOut, nextError);
     }
 
     virtual void GetSublayerPairs(std::vector<typename Layer<T, Mat>::sublayerinfo>& _out,

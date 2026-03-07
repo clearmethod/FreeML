@@ -11,7 +11,6 @@
 
 #include <cmath>
 #include <cstdint>
-#include <random>
 #include <string>
 #include <vector>
  
@@ -248,21 +247,7 @@ public:
         MatrixRef epsRef    = _blob->AcquireMatrix("Eps");
         if (latentRef.get() && epsRef.get())
         {
-            thread_local std::mt19937 s_rng{std::random_device{}()};
-            std::normal_distribution<float> dist(0.0f, 1.0f);
-            const size_t n    = muRef->GetElementCount();
-            const T* muData   = muRef->DataRead();
-            const T* lvData   = logVarRef->DataRead();
-            T* latentData     = latentRef->DataWrite();
-            T* epsData        = epsRef->DataWrite();
-            for (size_t i = 0; i < n; ++i)
-            {
-                const float e     = dist(s_rng);
-                const float lv    = std::max(-10.0f, std::min(4.0f, static_cast<float>(lvData[i])));
-                const float sigma = std::exp(0.5f * lv);
-                epsData[i]    = static_cast<T>(e);
-                latentData[i] = muData[i] + static_cast<T>(sigma * e);
-            }
+            ReparameterizeMat(latentRef.get(), epsRef.get(), muRef.get(), logVarRef.get());
         }
     }
 
@@ -297,22 +282,10 @@ public:
         if (errorIn && muValRef.get() && lvValRef.get() && epsRef.get() &&
             muGradRef.get() && lvGradRef.get())
         {
-            const size_t n   = errorIn->GetElementCount();
-            const T* dz      = errorIn->DataRead();
-            const T* muData  = muValRef->DataRead();
-            const T* lvData  = lvValRef->DataRead();
-            const T* epsData = epsRef->DataRead();
-            T* muGrad        = muGradRef->DataWrite();
-            T* lvGrad        = lvGradRef->DataWrite();
-            for (size_t i = 0; i < n; ++i)
-            {
-                const float lv    = std::max(-10.0f, std::min(4.0f, static_cast<float>(lvData[i])));
-                const float sigma = std::exp(0.5f * lv);
-                muGrad[i] = dz[i] - static_cast<T>(kl_weight * static_cast<float>(muData[i]));
-                lvGrad[i] = static_cast<T>(
-                    static_cast<float>(dz[i]) * static_cast<float>(epsData[i]) * 0.5f * sigma
-                    - kl_weight * 0.5f * (sigma * sigma - 1.0f));
-            }
+            ReparameterizeBackwardsMat(muGradRef.get(), lvGradRef.get(),
+                                       errorIn,
+                                       muValRef.get(), lvValRef.get(), epsRef.get(),
+                                       kl_weight);
         }
 
         // Backward through mu head.

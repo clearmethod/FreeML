@@ -2772,6 +2772,77 @@ void Fill(MatrixDX11<T>* _out, MatrixDX11<T>* _val)
 }
 
 template<class T>
+static inline uint32_t PackFloat(T value)
+{
+    static_assert(sizeof(T) == sizeof(uint32_t), "PackFloat expects 32-bit float.");
+    uint32_t packed = 0u;
+    std::memcpy(&packed, &value, sizeof(uint32_t));
+    return packed;
+}
+
+// Fill all elements of _out with a scalar float value passed via optional params.
+// Avoids allocating a separate GPU buffer for the value.
+template<class T>
+void Fill(MatrixDX11<T>* _out, float _val)
+{
+    assert(_out);
+    DirectX11Manager::Instance()->DumpInfoQueueErrors();
+
+    _out->Unmap();
+
+    DirectX11Manager* manager = _out->m_gInstance;
+    ID3D11DeviceContext* context = manager ? manager->GetContext() : nullptr;
+    ID3D11ComputeShader* shader  = manager ? manager->GetShader("fill_scalar") : nullptr;
+    if (!context || !shader)
+    {
+        return;
+    }
+
+    if (!SyncCBuffer(_out))
+    {
+        return;
+    }
+
+    const uint32_t valParam[1] = { PackFloat(_val) };
+    if (!manager->SetCBufferOptionalParams(_out->m_dataHandles.m_cbufferHandle, valParam, 1u))
+    {
+        return;
+    }
+
+    ID3D11Buffer* outCBuffer = manager->GetCBuffer(_out->m_dataHandles.m_cbufferHandle);
+    if (!outCBuffer)
+    {
+        return;
+    }
+
+    ID3D11UnorderedAccessView* outUAV = manager->GetBufferUAV(_out->m_dataHandles.m_bufferHandle);
+    if (!outUAV)
+    {
+        return;
+    }
+
+    context->CSSetShader(shader, nullptr, 0u);
+    ID3D11Buffer* cbs[] = { outCBuffer };
+    context->CSSetConstantBuffers(0u, 1u, cbs);
+    ID3D11UnorderedAccessView* uavs[] = { outUAV };
+    context->CSSetUnorderedAccessViews(0u, 1u, uavs, nullptr);
+
+    const uint32_t elementCount    = _out->GetElementCount();
+    const uint32_t threadsPerGroup = 256u;
+    const uint32_t groupCount      = (elementCount + threadsPerGroup - 1u) / threadsPerGroup;
+    context->Dispatch(groupCount, 1u, 1u);
+
+    ID3D11UnorderedAccessView* nullUAVs2[] = { nullptr };
+    context->CSSetUnorderedAccessViews(0u, 1u, nullUAVs2, nullptr);
+    context->CSSetShader(nullptr, nullptr, 0u);
+
+    DirectX11Manager::Instance()->DumpInfoQueueErrors();
+
+    if (GPUSyncCalls)
+        DirectX11Manager::Instance()->WaitForGPU();
+}
+
+template<class T>
 void Clear(MatrixDX11<T>* _out)
 {
     assert(_out);
@@ -3168,15 +3239,6 @@ void MatMul_Strided(MatrixDX11<T>* _out,
 }
 
 template<class T>
-static inline uint32_t PackFloat(T value)
-{
-    static_assert(sizeof(T) == sizeof(uint32_t), "PackFloat expects 32-bit float.");
-    uint32_t packed = 0u;
-    std::memcpy(&packed, &value, sizeof(uint32_t));
-    return packed;
-}
-
-template<class T>
 void AdamWUpdate(MatrixDX11<T>* param,
                  MatrixDX11<T>* grad,
                  MatrixDX11<T>* mt,
@@ -3318,5 +3380,177 @@ void AdamUpdate(MatrixDX11<T>* param,
                 T(0));
 }
 
+// Reparameterization trick: z = mu + exp(0.5 * clamp(logvar, -10, 4)) * eps,  eps ~ N(0,I).
+// GPU RNG uses PCG hash + Box-Muller seeded from a per-call counter.
+// Both _latent and _eps are written so the backward pass can reuse eps.
+template<class T>
+void ReparameterizeMat(MatrixDX11<T>* _latent, MatrixDX11<T>* _eps,
+                       MatrixDX11<T>* _mu,     MatrixDX11<T>* _logvar)
+{
+    assert(_latent && _eps && _mu && _logvar);
+    assert(_latent->GetElementCount() == _mu->GetElementCount());
+    DirectX11Manager::Instance()->DumpInfoQueueErrors();
+
+    _latent->Unmap();
+    _eps->Unmap();
+    _mu->Unmap();
+    _logvar->Unmap();
+
+    DirectX11Manager* manager = _latent->m_gInstance;
+    ID3D11DeviceContext* context = manager ? manager->GetContext() : nullptr;
+    ID3D11ComputeShader* shader  = manager ? manager->GetShader("reparameterize") : nullptr;
+    if (!context || !shader)
+    {
+        return;
+    }
+
+    if (!SyncCBuffer(_latent) || !SyncCBuffer(_eps) || !SyncCBuffer(_mu) || !SyncCBuffer(_logvar))
+    {
+        return;
+    }
+
+    static uint32_t s_seed = 0u;
+    ++s_seed;
+    const uint32_t seedParam[1] = { s_seed };
+    if (!manager->SetCBufferOptionalParams(_latent->m_dataHandles.m_cbufferHandle, seedParam, 1u))
+    {
+        return;
+    }
+
+    ID3D11Buffer* latentCB = manager->GetCBuffer(_latent->m_dataHandles.m_cbufferHandle);
+    ID3D11Buffer* muCB     = manager->GetCBuffer(_mu->m_dataHandles.m_cbufferHandle);
+    ID3D11Buffer* logvarCB = manager->GetCBuffer(_logvar->m_dataHandles.m_cbufferHandle);
+    ID3D11Buffer* epsCB    = manager->GetCBuffer(_eps->m_dataHandles.m_cbufferHandle);
+    if (!latentCB || !muCB || !logvarCB || !epsCB)
+    {
+        return;
+    }
+
+    ID3D11UnorderedAccessView* latentUAV = manager->GetBufferUAV(_latent->m_dataHandles.m_bufferHandle);
+    ID3D11UnorderedAccessView* epsUAV    = manager->GetBufferUAV(_eps->m_dataHandles.m_bufferHandle);
+    ID3D11ShaderResourceView*  muSRV     = manager->GetBufferSRV(_mu->m_dataHandles.m_bufferHandle);
+    ID3D11ShaderResourceView*  logvarSRV = manager->GetBufferSRV(_logvar->m_dataHandles.m_bufferHandle);
+    if (!latentUAV || !epsUAV || !muSRV || !logvarSRV)
+    {
+        return;
+    }
+
+    context->CSSetShader(shader, nullptr, 0u);
+
+    ID3D11Buffer* cbs[] = { latentCB, muCB, logvarCB, epsCB };
+    context->CSSetConstantBuffers(0u, 4u, cbs);
+
+    ID3D11ShaderResourceView* srvs[] = { muSRV, logvarSRV };
+    context->CSSetShaderResources(1u, 2u, srvs); // t1 = mu, t2 = logvar
+
+    ID3D11UnorderedAccessView* uavs[] = { latentUAV, epsUAV };
+    context->CSSetUnorderedAccessViews(0u, 2u, uavs, nullptr);
+
+    const uint32_t elementCount    = _latent->GetElementCount();
+    const uint32_t threadsPerGroup = 256u;
+    const uint32_t groupCount      = (elementCount + threadsPerGroup - 1u) / threadsPerGroup;
+    context->Dispatch(groupCount, 1u, 1u);
+
+    ID3D11UnorderedAccessView* nullUAVs[] = { nullptr, nullptr };
+    context->CSSetUnorderedAccessViews(0u, 2u, nullUAVs, nullptr);
+    ID3D11ShaderResourceView* nullSRVs[] = { nullptr, nullptr };
+    context->CSSetShaderResources(1u, 2u, nullSRVs);
+    context->CSSetShader(nullptr, nullptr, 0u);
+
+    DirectX11Manager::Instance()->DumpInfoQueueErrors();
+
+    if (GPUSyncCalls)
+        DirectX11Manager::Instance()->WaitForGPU();
+}
+
+// VAE reparameterization backward pass (GPU).
+// Computes muGrad and lvGrad in a single dispatch.
+// kl_weight is packed as a float bit-pattern into muGrad cbuffer optional param 0.
+template<class T>
+void ReparameterizeBackwardsMat(MatrixDX11<T>* _muGrad,  MatrixDX11<T>* _lvGrad,
+                                MatrixDX11<T>* _dz,     MatrixDX11<T>* _mu,
+                                MatrixDX11<T>* _logvar, MatrixDX11<T>* _eps,
+                                float _klWeight)
+{
+    assert(_muGrad && _lvGrad && _dz && _mu && _logvar && _eps);
+    assert(_muGrad->GetElementCount() == _dz->GetElementCount());
+    DirectX11Manager::Instance()->DumpInfoQueueErrors();
+
+    _muGrad->Unmap();
+    _lvGrad->Unmap();
+    _dz->Unmap();
+    _mu->Unmap();
+    _logvar->Unmap();
+    _eps->Unmap();
+
+    DirectX11Manager* manager = _muGrad->m_gInstance;
+    ID3D11DeviceContext* context = manager ? manager->GetContext() : nullptr;
+    ID3D11ComputeShader* shader  = manager ? manager->GetShader("reparameterize_backwards") : nullptr;
+    if (!context || !shader)
+    {
+        return;
+    }
+
+    if (!SyncCBuffer(_muGrad) || !SyncCBuffer(_lvGrad) || !SyncCBuffer(_dz)
+        || !SyncCBuffer(_mu)  || !SyncCBuffer(_logvar) || !SyncCBuffer(_eps))
+    {
+        return;
+    }
+
+    const uint32_t klParam[1] = { PackFloat(_klWeight) };
+    if (!manager->SetCBufferOptionalParams(_muGrad->m_dataHandles.m_cbufferHandle, klParam, 1u))
+    {
+        return;
+    }
+
+    ID3D11Buffer* muGradCB  = manager->GetCBuffer(_muGrad->m_dataHandles.m_cbufferHandle);
+    ID3D11Buffer* lvGradCB  = manager->GetCBuffer(_lvGrad->m_dataHandles.m_cbufferHandle);
+    ID3D11Buffer* dzCB      = manager->GetCBuffer(_dz->m_dataHandles.m_cbufferHandle);
+    ID3D11Buffer* muCB      = manager->GetCBuffer(_mu->m_dataHandles.m_cbufferHandle);
+    ID3D11Buffer* logvarCB  = manager->GetCBuffer(_logvar->m_dataHandles.m_cbufferHandle);
+    ID3D11Buffer* epsCB     = manager->GetCBuffer(_eps->m_dataHandles.m_cbufferHandle);
+    if (!muGradCB || !lvGradCB || !dzCB || !muCB || !logvarCB || !epsCB)
+    {
+        return;
+    }
+
+    ID3D11UnorderedAccessView* muGradUAV = manager->GetBufferUAV(_muGrad->m_dataHandles.m_bufferHandle);
+    ID3D11UnorderedAccessView* lvGradUAV = manager->GetBufferUAV(_lvGrad->m_dataHandles.m_bufferHandle);
+    ID3D11ShaderResourceView*  dzSRV     = manager->GetBufferSRV(_dz->m_dataHandles.m_bufferHandle);
+    ID3D11ShaderResourceView*  muSRV     = manager->GetBufferSRV(_mu->m_dataHandles.m_bufferHandle);
+    ID3D11ShaderResourceView*  logvarSRV = manager->GetBufferSRV(_logvar->m_dataHandles.m_bufferHandle);
+    ID3D11ShaderResourceView*  epsSRV    = manager->GetBufferSRV(_eps->m_dataHandles.m_bufferHandle);
+    if (!muGradUAV || !lvGradUAV || !dzSRV || !muSRV || !logvarSRV || !epsSRV)
+    {
+        return;
+    }
+
+    context->CSSetShader(shader, nullptr, 0u);
+
+    ID3D11Buffer* cbs[] = { muGradCB, lvGradCB, dzCB, muCB, logvarCB, epsCB };
+    context->CSSetConstantBuffers(0u, 6u, cbs);
+
+    ID3D11ShaderResourceView* srvs[] = { dzSRV, muSRV, logvarSRV, epsSRV };
+    context->CSSetShaderResources(1u, 4u, srvs); // t1=dz, t2=mu, t3=logvar, t4=eps
+
+    ID3D11UnorderedAccessView* uavs[] = { muGradUAV, lvGradUAV };
+    context->CSSetUnorderedAccessViews(0u, 2u, uavs, nullptr);
+
+    const uint32_t elementCount    = _muGrad->GetElementCount();
+    const uint32_t threadsPerGroup = 256u;
+    const uint32_t groupCount      = (elementCount + threadsPerGroup - 1u) / threadsPerGroup;
+    context->Dispatch(groupCount, 1u, 1u);
+
+    ID3D11UnorderedAccessView* nullUAVs[] = { nullptr, nullptr };
+    context->CSSetUnorderedAccessViews(0u, 2u, nullUAVs, nullptr);
+    ID3D11ShaderResourceView* nullSRVs[] = { nullptr, nullptr, nullptr, nullptr };
+    context->CSSetShaderResources(1u, 4u, nullSRVs);
+    context->CSSetShader(nullptr, nullptr, 0u);
+
+    DirectX11Manager::Instance()->DumpInfoQueueErrors();
+
+    if (GPUSyncCalls)
+        DirectX11Manager::Instance()->WaitForGPU();
+}
 
 #endif

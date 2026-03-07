@@ -126,6 +126,7 @@ class DirectX11Manager
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/scale_scalar.hlsl", "scale_scalar");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/scale_scalar_inplace.hlsl", "scale_scalar_inplace");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/fill.hlsl", "fill");
+            LoadComputeShaderFromFile("GPU/DirectX11/Shaders/fill_scalar.hlsl", "fill_scalar");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/softmax.hlsl", "softmax");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/softmax_backwards.hlsl", "softmax_backwards");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/cce_logits_loss.hlsl", "cce_logits_loss");
@@ -140,6 +141,8 @@ class DirectX11Manager
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/layernorm_backwards_dx.hlsl", "layernorm_backwards_dx");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/layernorm_backwards_params.hlsl", "layernorm_backwards_params");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/layernorm_backwards_params_nobeta.hlsl", "layernorm_backwards_params_nobeta");
+            LoadComputeShaderFromFile("GPU/DirectX11/Shaders/reparameterize.hlsl", "reparameterize");
+            LoadComputeShaderFromFile("GPU/DirectX11/Shaders/reparameterize_backwards.hlsl", "reparameterize_backwards");
 
             if (m_cbufferFreeList.empty())
             {
