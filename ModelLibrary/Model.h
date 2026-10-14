@@ -55,6 +55,7 @@ class Model
 
     void DeleteAllLayersAndBlobs()
     {
+        m_gradientClipWorkspace.Reset();
         ResetGradientAccumulation();
         for (const auto& [layer, blob] : m_layersAndBlobs)
         {
@@ -72,6 +73,7 @@ class Model
         m_rollingLossHistory.clear();
         m_rollingLossSum = 0.0;
         m_rollingLoss    = 0.0;
+        m_lossBatchActive = false;
 
         m_executionOrder.clear();
 
@@ -829,23 +831,12 @@ class Model
             Timer lossTimer;
             lossTimer.Start();
             m_lossFunc->Gradient(m_outputErrorMatrix.get(), _target, finalOutputMat);
-            double loss = 0.0f;
-            if(storeLoss)
+            if (m_lossBatchActive)
             {
-                loss = m_lossFunc->Loss(_target, finalOutputMat);
-
-                // Rolling window average
-                if (m_rollingLossHistory.size() >= m_rollingLossWindow)
-                {
-                    m_rollingLossSum -= m_rollingLossHistory.front();
-                    m_rollingLossHistory.pop_front();
-                }
-
-                m_rollingLossHistory.push_back(loss);
-                m_rollingLossSum += loss;
-                m_rollingLoss = m_rollingLossSum / static_cast<double>(m_rollingLossHistory.size());
-                m_lastLoss = loss;
+                m_lossFunc->AccumulateLoss(_target, finalOutputMat);
             }
+            else if (storeLoss)
+                RecordLoss(m_lossFunc->Loss(_target, finalOutputMat));
 
 
 
@@ -1005,6 +996,28 @@ class Model
         return m_rollingLoss;
     }
 
+    // Loss reporting is independent of gradient accumulation. Metal
+    // cross-entropy queues scalar accumulation until EndLossBatch reads it.
+    void BeginLossBatch()
+    {
+        if (m_lossBatchActive) throw std::logic_error("A loss batch is already active.");
+        if (!m_lossFunc) m_lossFunc = new DirectLoss<T,Mat>();
+        m_lossFunc->ResetAccumulatedLoss();
+        m_lossBatchActive = true;
+    }
+
+    double EndLossBatch()
+    {
+        if (!m_lossBatchActive) throw std::logic_error("No loss batch is active.");
+        Timer timer;
+        timer.Start();
+        const double mean = m_lossFunc->GetAccumulatedLossMean();
+        AddTimingOther("Batch Loss", timer.Elapsed(), m_timingsOther);
+        RecordLoss(mean);
+        m_lossBatchActive = false;
+        return mean;
+    }
+
     void SetRollingLossWindow(uint32_t _window)
     {
         m_rollingLossWindow = (_window > 0u) ? _window : 1u;
@@ -1019,6 +1032,7 @@ class Model
 
     void SetLoss(LossBase<T,Mat>* _in)
     {
+        if (m_lossBatchActive) throw std::logic_error("Cannot change loss during a loss batch.");
         m_lossFunc = _in;
     }
     
@@ -1203,10 +1217,24 @@ class Model
     std::string m_name = "No Name Set";
 
     private:
+    bool m_lossBatchActive = false;
+    void RecordLoss(double loss)
+    {
+        if (m_rollingLossHistory.size() >= m_rollingLossWindow)
+        {
+            m_rollingLossSum -= m_rollingLossHistory.front();
+            m_rollingLossHistory.pop_front();
+        }
+        m_rollingLossHistory.push_back(loss);
+        m_rollingLossSum += loss;
+        m_rollingLoss = m_rollingLossSum / m_rollingLossHistory.size();
+        m_lastLoss = static_cast<T>(loss);
+    }
     uint32_t m_gradientAccumulationSteps = 1u;
     uint32_t m_pendingGradientPasses = 0u;
     float m_gradientClipNorm = 0.0f;
     bool m_selectiveWeightDecay = false;
+    GradientClipWorkspace<T,Mat> m_gradientClipWorkspace;
     std::unordered_map<Mat*, MatrixRef> m_accumulatedGradients;
     std::unordered_map<Mat*, float> m_accumulatedDecayScales;
 
@@ -1221,28 +1249,11 @@ class Model
             else
                 return gradient.get();
         };
-        // Read each unique parameter's gradient once. This deliberately uses
-        // CPU reduction for now; GPU mappings are released before scaling.
-        double squaredNorm = 0.0;
+        std::vector<Mat*> matrices;
+        matrices.reserve(gradients.size());
         for (auto& [parameter, entry] : gradients)
-        {
-            Mat* gradient = pointer(entry);
-            const T* values = gradient->DataRead();
-            for (uint32_t i = 0; i < gradient->GetElementCount(); ++i)
-            {
-                const double value = static_cast<double>(values[i]);
-                squaredNorm += value * value;
-            }
-            if constexpr (requires { gradient->Unmap(); })
-                gradient->Unmap();
-        }
-        if (!std::isfinite(squaredNorm))
-            throw std::runtime_error("Cannot clip non-finite gradients.");
-        const float scale = static_cast<float>(std::min(1.0,
-            double(m_gradientClipNorm) / (std::sqrt(squaredNorm) + 1e-6)));
-        if (scale < 1.0f)
-            for (auto& [parameter, gradient] : gradients)
-                Scale(pointer(gradient), pointer(gradient), scale);
+            matrices.push_back(pointer(entry));
+        ClipGradientNorm(matrices, m_gradientClipNorm, m_gradientClipWorkspace);
     }
 
     void UpdateParameters()

@@ -1,7 +1,9 @@
 #pragma once
 
 #include <MatrixLibrary/MatrixBase.h>
+#include <MatrixLibrary/GradientClipWorkspace.h>
 #include <ToolsLibrary/ThreadPool.h>
+#include <ToolsLibrary/Tools.h>
 
 #include <latch>
 #include <cassert>
@@ -1179,6 +1181,23 @@ void Clear(MatrixBase<T>* _out)
     memset(_out->DataWrite(), 0, sizeof(T) * _out->GetElementCount());
 }
 
+// Binary keep mask. Scaling by 1/(1-probability) remains the layer's job.
+// An explicit seed reproduces the same logical mask on CPU, Metal and DX11.
+template<class T>
+void DropoutMask(MatrixBase<T>* out, float probability,
+                 uint32_t seed = RandomUtils::NextSeed())
+{
+    assert(out && std::isfinite(probability));
+    if (out->GetElementCount() == 0u) return;
+    T* values = out->DataWrite();
+    const uint32_t stream = RandomUtils::pcg_hash(seed);
+    for (uint32_t i = 0; i < out->GetElementCount(); ++i)
+    {
+        const float uniform = float(RandomUtils::pcg_hash(i ^ stream) >> 8u) * (1.0f / 16777216.0f);
+        values[i] = uniform < probability ? T(0) : T(1);
+    }
+}
+
 template<class T>
 void Fill(MatrixBase<T>* _out, float _val)
 {
@@ -1732,3 +1751,34 @@ void ReparameterizeMat(MatrixBase<T>* _latent, MatrixBase<T>* _eps,
 }
 
 #include "MatrixBase_Mul.h"
+
+// The caller supplies each unique parameter gradient once, after averaging.
+// GPU overloads keep reduction and scaling on the device.
+template<class T, class Mat>
+void ClipGradientNorm(const std::vector<Mat*>& gradients, float maximumNorm,
+                      GradientClipWorkspace<T,Mat>& workspace)
+{
+    (void)workspace;
+    if (!std::isfinite(maximumNorm) || maximumNorm < 0.0f)
+        throw std::invalid_argument("Gradient clip norm must be finite and nonnegative.");
+    if (maximumNorm == 0.0f) return;
+    double squaredNorm = 0.0;
+    for (auto* gradient : gradients)
+    {
+        if (!gradient) throw std::invalid_argument("Null gradient in norm clipping.");
+        if (gradient->GetElementCount() == 0u) continue;
+        const T* values = gradient->DataRead();
+        for (uint32_t i = 0; i < gradient->GetElementCount(); ++i)
+        {
+            const double value = static_cast<double>(values[i]);
+            squaredNorm += value * value;
+        }
+        if constexpr (requires { gradient->Unmap(); }) gradient->Unmap();
+    }
+    if (!std::isfinite(squaredNorm))
+        throw std::runtime_error("Cannot clip non-finite gradients.");
+    const float factor = float(std::min(1.0,double(maximumNorm)/(std::sqrt(squaredNorm)+1e-6)));
+    if (factor < 1.0f)
+        for (auto* gradient : gradients)
+            if (gradient->GetElementCount() != 0u) Scale(gradient,gradient,factor);
+}

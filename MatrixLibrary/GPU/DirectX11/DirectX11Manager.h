@@ -128,6 +128,9 @@ class DirectX11Manager
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/scale_scalar_inplace.hlsl", "scale_scalar_inplace");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/fill.hlsl", "fill");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/fill_scalar.hlsl", "fill_scalar");
+            LoadComputeShaderFromFile("GPU/DirectX11/Shaders/dropout_mask.hlsl", "dropout_mask");
+            LoadComputeShaderFromFile("GPU/DirectX11/Shaders/gradient_norm_partials.hlsl", "gradient_norm_partials");
+            LoadComputeShaderFromFile("GPU/DirectX11/Shaders/gradient_norm_scale.hlsl", "gradient_norm_scale");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/softmax.hlsl", "softmax");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/softmax_backwards.hlsl", "softmax_backwards");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/attention_scores_backwards.hlsl", "attention_scores_backwards");

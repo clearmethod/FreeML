@@ -305,7 +305,10 @@ void SumColumns(MatrixMetal<T>* _out, MatrixMetal<T>* _in)
     _out->Unmap();
     _in->Unmap();
 
-    Obj pipeline = manager->GetPipeline("sum_columns");
+    Obj parallelPipeline = _in->GetDimsY() >= 64u
+        ? manager->GetPipeline("sum_columns_parallel") : nullptr;
+    const bool parallel = parallelPipeline != nullptr;
+    Obj pipeline = parallel ? parallelPipeline : manager->GetPipeline("sum_columns");
     Obj queue = manager->GetQueue();
     if (!pipeline || !queue)
     {
@@ -341,7 +344,11 @@ void SumColumns(MatrixMetal<T>* _out, MatrixMetal<T>* _in)
 
     MTLSize threads = {_out->GetDimsX(), 1, 1};
     MTLSize threadsPerThreadgroup = {256u, 1, 1};
-    Send<void>(encoder, "dispatchThreads:threadsPerThreadgroup:", threads, threadsPerThreadgroup);
+    if (parallel)
+        Send<void>(encoder, "dispatchThreadgroups:threadsPerThreadgroup:",
+            MTLSize{(_out->GetDimsX()+31u)/32u,1u,1u},MTLSize{32u,8u,1u});
+    else
+        Send<void>(encoder, "dispatchThreads:threadsPerThreadgroup:", threads, threadsPerThreadgroup);
 
     manager->WorkSubmitted();
     manager->DumpInfoQueueErrors();
@@ -994,7 +1001,11 @@ void LayerNormBackwardsOp(MatrixMetal<T>* _dX,
     }
 
     const bool hasBeta = (_dBeta != nullptr);
-    Obj paramsPipeline = manager->GetPipeline(hasBeta ? "layernorm_backwards_params" : "layernorm_backwards_params_nobeta");
+    Obj parallelParamsPipeline = _dY->GetDimsY()*_dY->GetDimsZ() >= 64u
+        ? manager->GetPipeline(hasBeta ? "layernorm_backwards_params_parallel" : "layernorm_backwards_params_nobeta_parallel") : nullptr;
+    const bool parallelParams = parallelParamsPipeline != nullptr;
+    Obj paramsPipeline = parallelParams ? parallelParamsPipeline
+        : manager->GetPipeline(hasBeta ? "layernorm_backwards_params" : "layernorm_backwards_params_nobeta");
     Obj dxPipeline = manager->GetPipeline(_invStd ? "layernorm_backwards_dx_cached" : "layernorm_backwards_dx");
     Obj queue = manager->GetQueue();
     if (!paramsPipeline || !dxPipeline || !queue)
@@ -1068,7 +1079,11 @@ void LayerNormBackwardsOp(MatrixMetal<T>* _dX,
 
     MTLSize paramThreads = {_dGamma->GetDimsX(), 1, 1};
     MTLSize threadsPerThreadgroup = {256u, 1, 1};
-    Send<void>(encoder, "dispatchThreads:threadsPerThreadgroup:", paramThreads, threadsPerThreadgroup);
+    if (parallelParams)
+        Send<void>(encoder, "dispatchThreadgroups:threadsPerThreadgroup:",
+            MTLSize{(_dGamma->GetDimsX()+31u)/32u,1u,1u},MTLSize{32u,8u,1u});
+    else
+        Send<void>(encoder, "dispatchThreads:threadsPerThreadgroup:", paramThreads, threadsPerThreadgroup);
 
     Send<void>(encoder, "setComputePipelineState:", dxPipeline);
     Send<void>(encoder, "setBuffer:offset:atIndex:", dXBuffer, 0ull, 0ull);
@@ -1571,6 +1586,73 @@ void Fill(MatrixMetal<T>* _out, MatrixMetal<T>* _val)
     manager->WorkSubmitted();
     manager->DumpInfoQueueErrors();
 }
+
+template<class T>
+void DropoutMask(MatrixMetal<T>* _out, float probability,
+                 uint32_t seed = RandomUtils::NextSeed())
+{
+    assert(_out && std::isfinite(probability));
+    if (_out->GetElementCount() == 0u) return;
+
+    MetalManager* manager = _out->m_gInstance ? _out->m_gInstance : MetalManager::Instance();
+    if (!manager)
+    {
+        return;
+    }
+
+    manager->DumpInfoQueueErrors();
+    _out->Unmap();
+
+    Obj pipeline = manager->GetPipeline("dropout_mask");
+    Obj queue = manager->GetQueue();
+    if (!pipeline || !queue)
+    {
+        return;
+    }
+
+    if (!manager->UpdateCachedCBuffer(_out->m_dataHandles.m_cbufferHandle,
+                                      _out->GetDimsX(),
+                                      _out->GetDimsY(),
+                                      _out->GetDimsZ(),
+                                      _out->GetOffset(),
+                                      static_cast<uint32_t>(_out->GetID())))
+    {
+        return;
+    }
+
+    const uint32_t optionalParams[2] = {MetalPackFloatBits(probability), seed};
+    if (!manager->SetCBufferOptionalParams(_out->m_dataHandles.m_cbufferHandle, optionalParams, 2u))
+    {
+        return;
+    }
+
+    Obj outBuffer = manager->GetBuffer(_out->m_dataHandles.m_bufferHandle);
+    Obj outCBuffer = manager->GetCBuffer(_out->m_dataHandles.m_cbufferHandle);
+    if (!outBuffer || !outCBuffer)
+    {
+        return;
+    }
+
+    Obj commandBuffer = manager->GetCommandBuffer();
+    Obj encoder = manager->GetEncoder();
+    if (!commandBuffer || !encoder)
+    {
+        return;
+    }
+
+    Send<void>(encoder, "setComputePipelineState:", pipeline);
+    Send<void>(encoder, "setBuffer:offset:atIndex:", outBuffer, 0ull, 0ull);
+    MetalBindCBuffer(encoder, outCBuffer, 1ull);
+
+    const uint32_t elementCount = _out->GetElementCount();
+    MTLSize threads = {elementCount, 1, 1};
+    MTLSize threadsPerThreadgroup = {256u, 1, 1};
+    Send<void>(encoder, "dispatchThreads:threadsPerThreadgroup:", threads, threadsPerThreadgroup);
+
+    manager->WorkSubmitted();
+    manager->DumpInfoQueueErrors();
+}
+
 
 template<class T>
 void Fill(MatrixMetal<T>* _out, float _val)
@@ -2444,4 +2526,56 @@ void MatMul_Strided(MatrixMetal<T>* _out,
     manager->DumpInfoQueueErrors();
 }
  
+// All gradient reads, reductions, scale generation and scaling remain queued.
+template<class T>
+void ClipGradientNorm(const std::vector<MatrixMetal<T>*>& gradients, float maximumNorm,
+                      GradientClipWorkspace<T,MatrixMetal<T>>& workspace)
+{
+    if (!std::isfinite(maximumNorm) || maximumNorm < 0.0f)
+        throw std::invalid_argument("Gradient clip norm must be finite and nonnegative.");
+    if (maximumNorm == 0.0f) return;
+    const uint32_t partialCount = workspace.Prepare(gradients);
+    if (partialCount == 0u) return;
+    auto* manager = workspace.partials->m_gInstance;
+    Obj reducePipeline = manager->GetPipeline("gradient_norm_partials");
+    Obj scalePipeline = manager->GetPipeline("gradient_norm_scale");
+    if (!reducePipeline || !scalePipeline)
+        throw std::runtime_error("Missing GPU gradient norm pipeline.");
+    workspace.partials->Unmap(); workspace.scale->Unmap();
+    if (!MetalSyncCBuffer(workspace.partials.get()) || !MetalSyncCBuffer(workspace.scale.get()))
+        throw std::runtime_error("Cannot bind gradient norm scratch buffers.");
+    Obj partialBuffer = manager->GetBuffer(workspace.partials->m_dataHandles.m_bufferHandle);
+    Obj partialCB = manager->GetCBuffer(workspace.partials->m_dataHandles.m_cbufferHandle);
+    uint32_t destination = 0u;
+    for (auto* gradient : gradients)
+    {
+        if (gradient->GetElementCount() == 0u) continue;
+        gradient->Unmap();
+        if (!MetalSyncCBuffer(gradient)) throw std::runtime_error("Cannot bind gradient buffer.");
+        Obj encoder = manager->GetEncoder();
+        Send<void>(encoder,"setComputePipelineState:",reducePipeline);
+        Send<void>(encoder,"setBuffer:offset:atIndex:",partialBuffer,0ull,0ull);
+        Send<void>(encoder,"setBuffer:offset:atIndex:",manager->GetBuffer(gradient->m_dataHandles.m_bufferHandle),0ull,1ull);
+        MetalBindCBuffer(encoder,partialCB,2ull);
+        MetalBindCBuffer(encoder,manager->GetCBuffer(gradient->m_dataHandles.m_cbufferHandle),3ull);
+        Send<void>(encoder,"setBytes:length:atIndex:",&destination,sizeof(destination),4ull);
+        const uint32_t groups = uint32_t((uint64_t(gradient->GetElementCount())+1023u)/1024u);
+        Send<void>(encoder,"dispatchThreadgroups:threadsPerThreadgroup:",MTLSize{groups,1u,1u},MTLSize{256u,1u,1u});
+        manager->WorkSubmitted();
+        destination += groups;
+    }
+    const uint32_t params[] = {MetalPackFloatBits(maximumNorm),partialCount};
+    manager->SetCBufferOptionalParams(workspace.scale->m_dataHandles.m_cbufferHandle,params,2u);
+    Obj encoder = manager->GetEncoder();
+    Send<void>(encoder,"setComputePipelineState:",scalePipeline);
+    Send<void>(encoder,"setBuffer:offset:atIndex:",manager->GetBuffer(workspace.scale->m_dataHandles.m_bufferHandle),0ull,0ull);
+    Send<void>(encoder,"setBuffer:offset:atIndex:",partialBuffer,0ull,1ull);
+    MetalBindCBuffer(encoder,manager->GetCBuffer(workspace.scale->m_dataHandles.m_cbufferHandle),2ull);
+    MetalBindCBuffer(encoder,partialCB,3ull);
+    Send<void>(encoder,"dispatchThreadgroups:threadsPerThreadgroup:",MTLSize{1u,1u,1u},MTLSize{256u,1u,1u});
+    manager->WorkSubmitted();
+    for (auto* gradient : gradients)
+        if (gradient->GetElementCount() != 0u) Scale(gradient,gradient,workspace.scale.get());
+}
+
 #endif

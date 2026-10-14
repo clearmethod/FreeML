@@ -170,7 +170,11 @@ class MetalManager
             LoadComputeShaderFromFile("GPU/Metal/Shaders/scale_scalar_inplace.metal", "scale_scalar_inplace");
             LoadComputeShaderFromFile("GPU/Metal/Shaders/fill.metal", "fill");
             LoadComputeShaderFromFile("GPU/Metal/Shaders/fill_scalar.metal", "fill_scalar");
+            LoadComputeShaderFromFile("GPU/Metal/Shaders/dropout_mask.metal", "dropout_mask");
+            LoadComputeShaderFromFile("GPU/Metal/Shaders/gradient_norm.metal", "gradient_norm_partials");
+            LoadComputeShaderFromFile("GPU/Metal/Shaders/gradient_norm.metal", "gradient_norm_scale");
             LoadComputeShaderFromFile("GPU/Metal/Shaders/sum_columns.metal", "sum_columns");
+            LoadComputeShaderFromFile("GPU/Metal/Shaders/sum_columns_parallel.metal", "sum_columns_parallel");
             LoadComputeShaderFromFile("GPU/Metal/Shaders/gelu.metal", "gelu");
             LoadComputeShaderFromFile("GPU/Metal/Shaders/gelu_inplace.metal", "gelu_inplace");
             LoadComputeShaderFromFile("GPU/Metal/Shaders/gelu_derivative.metal", "gelu_derivative");
@@ -196,7 +200,9 @@ class MetalManager
             LoadComputeShaderFromFile("GPU/Metal/Shaders/layernorm_nobeta_no_xhat.metal", "layernorm_nobeta_no_xhat");
             LoadComputeShaderFromFile("GPU/Metal/Shaders/layernorm_backwards_dx.metal", "layernorm_backwards_dx");
             LoadComputeShaderFromFile("GPU/Metal/Shaders/layernorm_backwards_params.metal", "layernorm_backwards_params");
+            LoadComputeShaderFromFile("GPU/Metal/Shaders/layernorm_backwards_params_parallel.metal", "layernorm_backwards_params_parallel");
             LoadComputeShaderFromFile("GPU/Metal/Shaders/layernorm_backwards_params_nobeta.metal", "layernorm_backwards_params_nobeta");
+            LoadComputeShaderFromFile("GPU/Metal/Shaders/layernorm_backwards_params_nobeta_parallel.metal", "layernorm_backwards_params_nobeta_parallel");
 
             // Prealloc cbuffers
             if (m_cbufferFreeList.empty())

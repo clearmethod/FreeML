@@ -486,10 +486,7 @@ static void TrainLoop(Model<T, MatType>*            model,
     uint64_t update = adam->GetMaximumStepCount();
     LOG_INFO() << "Resuming learning-rate schedule after " << update << " optimizer updates.";
 
-    // Track completed effective batches, rather than individual sequence passes.
-    constexpr size_t rollingLossWindow = 100u;
-    std::deque<double> batchLossHistory;
-    double rollingBatchLossSum = 0.0;
+    model->SetRollingLossWindow(100u);
 
     // Loop forever training.
     while(true)
@@ -498,31 +495,23 @@ static void TrainLoop(Model<T, MatType>*            model,
         {
             const float learningRate = schedule.AtUpdate(update);
             adam->SetLearningRate(learningRate);
-            double batchLossSum = 0.0;
+            model->BeginLossBatch();
             for (uint32_t pass = 0; pass < cfg.gradient_accumulation_steps; ++pass)
             {
                 const uint32_t start = (maxStart == 0u ? 0u : startDist(rng));
                 CopyRange(inputBuffer, corpus, 0u, start, cfg.block_size);
                 CopyRange(targetBuffer, corpus, 0u, start + 1u, cfg.block_size);
-                model->Run(inputBuffer, targetBuffer, true);
-                batchLossSum += model->GetLastLoss();
+                model->Run(inputBuffer, targetBuffer);
             }
             ++update;
 
-            // Each sampled sequence has the same number of target tokens.
-            const double batchLoss = batchLossSum / cfg.gradient_accumulation_steps;
-            if (batchLossHistory.size() == rollingLossWindow)
-            {
-                rollingBatchLossSum -= batchLossHistory.front();
-                batchLossHistory.pop_front();
-            }
-            batchLossHistory.push_back(batchLoss);
-            rollingBatchLossSum += batchLoss;
-            const double rollingBatchLoss = rollingBatchLossSum / batchLossHistory.size();
+            // Read once, after every backward pass and the optimizer update
+            // have been recorded. Every sequence has the same token count.
+            const double batchLoss = model->EndLossBatch();
 
             LOG_INFO() << "Iteration: " << i << " Optimizer updates: " << update
                        << " LR: " << learningRate << " Loss: " << batchLoss
-                       << " Rolling loss: " << rollingBatchLoss;
+                       << " Rolling loss: " << model->GetRollingLoss();
             // Save after a complete optimizer update.
             if (i % cfg.save_interval == 0 && i > 0u)
             {

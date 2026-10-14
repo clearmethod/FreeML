@@ -233,18 +233,38 @@ public:
     T Loss(Mat* target, Mat* logits) override
     {
         if (!target || !logits || !logits->GetElementCount()) return T(0);
-        ValidateTargets(target, logits);
-        auto& manager = MatrixManager<T, Mat>::Instance();
-        const uint32_t rows = logits->GetDimsY() * logits->GetDimsZ();
-        if (!m_rowLoss || m_rowLoss->GetDimsY() != rows)
-            m_rowLoss = manager.AllocateMatrix({2u, rows, 1u}, "CrossEntropyRows");
-        if (!m_loss)
-            m_loss = manager.AllocateMatrix({1u, 1u, 1u}, "CrossEntropyLoss");
-        Encode("cce_logits_loss", m_rowLoss.get(), target, logits, rows);
-        Encode("cce_logits_reduce", m_loss.get(), m_rowLoss.get(), target, 1u);
+        EncodeLoss(target,logits);
         const T result = m_loss->DataRead()[0];
         m_loss->Unmap();
         return result;
+    }
+
+    void ResetAccumulatedLoss() override
+    {
+        LossBase<T,Mat>::ResetAccumulatedLoss();
+        if (!m_batchLoss)
+            m_batchLoss = MatrixManager<T,Mat>::Instance().AllocateMatrix({1u,1u,1u},"CrossEntropyBatchLoss");
+        Fill(m_batchLoss.get(),0.0f);
+    }
+
+    void AccumulateLoss(Mat* target, Mat* logits) override
+    {
+        if (!m_batchLoss) ResetAccumulatedLoss();
+        if (target && logits && logits->GetElementCount())
+        {
+            EncodeLoss(target,logits);
+            Add(m_batchLoss.get(),m_batchLoss.get(),m_loss.get());
+        }
+        ++this->m_accumulatedLossCount;
+    }
+
+    double GetAccumulatedLossMean() override
+    {
+        if (!this->m_accumulatedLossCount || !m_loss) return 0.0;
+        Scale(m_loss.get(),m_batchLoss.get(),float(1.0/double(this->m_accumulatedLossCount)));
+        const T mean = m_loss->DataRead()[0];
+        m_loss->Unmap();
+        return mean;
     }
 
     void Gradient(Mat* out, Mat* target, Mat* logits) override
@@ -268,6 +288,20 @@ private:
     MatrixRef m_inverseCount;
     MatrixRef m_rowLoss;
     MatrixRef m_loss;
+    MatrixRef m_batchLoss;
+
+    void EncodeLoss(Mat* target, Mat* logits)
+    {
+        ValidateTargets(target, logits);
+        auto& manager = MatrixManager<T, Mat>::Instance();
+        const uint32_t rows = logits->GetDimsY() * logits->GetDimsZ();
+        if (!m_rowLoss || m_rowLoss->GetDimsY() != rows)
+            m_rowLoss = manager.AllocateMatrix({2u, rows, 1u}, "CrossEntropyRows");
+        if (!m_loss)
+            m_loss = manager.AllocateMatrix({1u, 1u, 1u}, "CrossEntropyLoss");
+        Encode("cce_logits_loss", m_rowLoss.get(), target, logits, rows);
+        Encode("cce_logits_reduce", m_loss.get(), m_rowLoss.get(), target, 1u);
+    }
 
     static void ValidateTargets(Mat* target, Mat* logits)
     {
