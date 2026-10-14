@@ -75,6 +75,7 @@ Datablob<T, Mat>* InitCausalSelfAttentionLayerBlob(
     auto scalarScale = inst.AllocateMatrix({1u, 1u, 1u}, "ScalarScale");
     scalarScale->SetValue(0u, 0u, scale);
     blob->Set("ScalarScale", scalarScale);
+    blob->Set("ScalarScaleHeadDim", headDim);
 
     return blob;
 }
@@ -270,22 +271,29 @@ class CausalSelfAttentionLayer : public Layer<T, Mat>
             }
         }
 
-        // Per-head attention outputs and dropout buffers.
+        // Heads share backing buffers; each dropout blob retains its own mask.
+        Mat* oldStorage = _blob->GetMatrix("AttentionProbsAll");
+        const bool rebindHeads = !oldStorage || oldStorage->GetDimsX() != attRows
+            || oldStorage->GetDimsY() != attRows
+            || oldStorage->GetDimsZ() != dims.B_batch * dims.nHead;
+        this->EnsureMatrix(_blob, "AttentionProbsAll", attRows, attRows, dims.B_batch * dims.nHead);
+        this->EnsureMatrix(_blob, "AttentionDroppedAll", attRows, attRows, dims.B_batch * dims.nHead);
+        Mat* probsStorage = _blob->GetMatrix("AttentionProbsAll");
+        Mat* droppedStorage = _blob->GetMatrix("AttentionDroppedAll");
         for (uint32_t head = 0; head < dims.nHead; ++head)
         {
+            BindHeadStorage(_blob, HeadAttKey(head), probsStorage, head, dims.B_batch, rebindHeads);
             Datablob<T, Mat>* attentionDropoutBlob = GetAttentionDropoutBlob(_blob, head);
             if (attentionDropoutBlob)
             {
-                this->EnsureMatrix(attentionDropoutBlob, "Output_0", attRows, attRows, dims.B_batch);
+                BindHeadStorage(attentionDropoutBlob, "Output_0", droppedStorage,
+                                head, dims.B_batch, rebindHeads);
                 if (attentionDropoutBlob->GetUInt("TrainingEnabled") > 0u)
                 {
                     this->EnsureMatrix(attentionDropoutBlob, "Mask", attRows, attRows, dims.B_batch);
                     this->EnsureMatrix(attentionDropoutBlob, "ErrorOutput_0", attRows, attRows, dims.B_batch);
                 }
             }
-
-            const std::string attKey = HeadAttKey(head);
-            this->EnsureMatrix(_blob, attKey.c_str(), attRows, attRows, dims.B_batch);
         }
 
         // Residual dropout buffers.
@@ -312,6 +320,10 @@ class CausalSelfAttentionLayer : public Layer<T, Mat>
         this->EnsureMatrix(_blob, "Scratch_dKh"     , dims.headDim, dims.T_block_size    , dims.nHead);
         this->EnsureMatrix(_blob, "Scratch_dVh"     , dims.headDim, dims.T_block_size    , dims.nHead);
         this->EnsureMatrix(_blob, "Scratch_QKVGrad" , 3u * dims.C_EmbedDims, dims.T_block_size     , dims.B_batch);
+        for (uint32_t head = 0; head < dims.nHead; ++head)
+            BindHeadStorage(_blob, "Scratch_dAttHead_" + std::to_string(head),
+                            _blob->GetMatrix("Scratch_dAtt"), head, 1u, rebindHeads);
+
 
         if (attentionBlob)
         {
@@ -330,7 +342,8 @@ class CausalSelfAttentionLayer : public Layer<T, Mat>
             }
         }
 
-        if(!_blob->GetMatrix("TriangleMatrix"))
+        Mat* triangle = _blob->GetMatrix("TriangleMatrix");
+        if (!triangle || triangle->GetDimsX() != attRows || triangle->GetDimsY() != attRows)
         {
             this->EnsureMatrix(_blob, "TriangleMatrix", attRows, attRows);
             typename MatrixManager<T, Mat>::MatrixRef triMaskRef = _blob->AcquireMatrix("TriangleMatrix");
@@ -340,7 +353,8 @@ class CausalSelfAttentionLayer : public Layer<T, Mat>
                 TriangleMatrix<T>(triMask, TriangleDirection::Lower, T(0), -std::numeric_limits<T>::infinity());
             }
         }
-        if (!_blob->GetMatrix("TriangleFiniteMask"))
+        Mat* finiteTriangle = _blob->GetMatrix("TriangleFiniteMask");
+        if (!finiteTriangle || finiteTriangle->GetDimsX() != attRows || finiteTriangle->GetDimsY() != attRows)
         {
             this->EnsureMatrix(_blob, "TriangleFiniteMask", attRows, attRows);
             typename MatrixManager<T, Mat>::MatrixRef triFiniteMaskRef = _blob->AcquireMatrix("TriangleFiniteMask");
@@ -349,6 +363,12 @@ class CausalSelfAttentionLayer : public Layer<T, Mat>
             {
                 TriangleMatrix<T>(triFiniteMask, TriangleDirection::Lower, T(1), T(0));
             }
+        }
+        if (_blob->GetUInt("ScalarScaleHeadDim") != dims.headDim)
+        {
+            auto scaleRef = _blob->AcquireMatrix("ScalarScale");
+            scaleRef->SetValue(0u, 0u, T(1) / std::sqrt(T(dims.headDim)));
+            _blob->Set("ScalarScaleHeadDim", dims.headDim);
         }
     }
 
@@ -573,93 +593,43 @@ class CausalSelfAttentionLayer : public Layer<T, Mat>
         m_proj->Backwards(projBlob);
         Copy(dY, m_proj->GetOutputError(projBlob).get());
 
-        auto triFiniteMaskRef = _blob->AcquireMatrix("TriangleFiniteMask");
-        Mat* triFiniteMask    = triFiniteMaskRef.get();
+
+        Mat qHeads, kHeads, vHeads, dyHeads;
+        Q->GetSliceZ(&qHeads, 0); qHeads.SetDims({headDim, dT, nHead});
+        K->GetSliceZ(&kHeads, 0); kHeads.SetDims({headDim, dT, nHead});
+        V->GetSliceZ(&vHeads, 0); vHeads.SetDims({headDim, dT, nHead});
+        dY->GetSliceZ(&dyHeads, 0); dyHeads.SetDims({headDim, dT, nHead});
+        const MatrixStrides featureStrides{dC, 1u, headDim};
+        const MatrixStrides scoreStrides{dT, 1u, dT * dT};
+        const MatrixStrides gradientStrides{headDim, 1u, dT * headDim};
+        auto droppedRef = _blob->AcquireMatrix("AttentionDroppedAll");
+        MatMul_Batched<TransposeMode::Right>(dAttAll, &dyHeads, &vHeads,
+                                             scoreStrides, featureStrides, featureStrides);
+        MatMul_Batched<TransposeMode::Left>(dVhAll, droppedRef.get(), &dyHeads,
+                                            gradientStrides, scoreStrides, featureStrides);
 
         for (uint32_t head = 0; head < nHead; ++head)
         {
-            auto attHeadAllRef = _blob->AcquireMatrix(HeadAttKey(head).c_str());
-            Mat* attHeadAll = attHeadAllRef.get();
-
             Datablob<T, Mat>* attentionDropoutBlob = GetAttentionDropoutBlob(_blob, head);
-            Mat* attDroppedAll = attHeadAll;
-            if (attentionDropoutBlob)
-            {
-                attDroppedAll = m_attentionDropout->GetOutput(attentionDropoutBlob).get();
-                if (!attDroppedAll)
-                    attDroppedAll = attentionDropoutBlob->GetMatrix("Output_0");
-            }
-
-            Mat dAtt;
-            dAttAll->GetSliceZ(&dAtt, head);
-            Mat dScores;
-            dScoresAll->GetSliceZ(&dScores, head);
-            Mat dQh;
-            dQhAll->GetSliceZ(&dQh, head);
-            Mat dKh;
-            dKhAll->GetSliceZ(&dKh, head);
-            Mat dVh;
-            dVhAll->GetSliceZ(&dVh, head);
-
-            Mat QueryHead;
-            QueryHead.SetData(Q->GetData(), Q->GetOffset() + head * headDim);
-            QueryHead.SetDims({ headDim, dT });
-
-            Mat KeyHead;
-            KeyHead.SetData(K->GetData(), K->GetOffset() + head * headDim);
-            KeyHead.SetDims({ headDim, dT });
-
-            Mat ValueHead;
-            ValueHead.SetData(V->GetData(), V->GetOffset() + head * headDim);
-            ValueHead.SetDims({ headDim, dT });
-
-            Mat YPerHeadOutput;
-            YPerHeadOutput.SetData(dY->GetData(), dY->GetOffset() + head * headDim);
-            YPerHeadOutput.SetDims({ headDim, dT });
-
-            // 7)
-            MatMul_Strided<TransposeMode::Right>(&dAtt,
-                                                    &YPerHeadOutput,
-                                                    &ValueHead,
-                                                    dC,1u,
-                                                    dC,1u,
-                                                    dT,1u);
-
-            MatMul_Strided<TransposeMode::Left>( &dVh,
-                                                    attDroppedAll,
-                                                    &YPerHeadOutput,
-                                                    dT,1u,
-                                                    dC,1u,
-                                                    headDim,1u);
+            auto dAttRef = _blob->AcquireMatrix("Scratch_dAttHead_" + std::to_string(head));
+            Mat* dAtt = dAttRef.get();
 
             // 6)
             if (attentionDropoutBlob && attentionDropoutBlob->GetFloat("Probability") > 0.f)
             {
-                m_attentionDropout->SetErrorInput(attentionDropoutBlob, &dAtt);
+                m_attentionDropout->SetErrorInput(attentionDropoutBlob, dAttRef);
                 m_attentionDropout->Backwards(attentionDropoutBlob);
-                Copy(&dAtt, m_attentionDropout->GetOutputError(attentionDropoutBlob).get());
+                Copy(dAtt, m_attentionDropout->GetOutputError(attentionDropoutBlob).get());
             }
 
-            // 5)
-            SoftmaxBackwards(&dScores, attHeadAll, &dAtt);
-            PerElementMul(&dScores, &dScores, triFiniteMask);
-            Scale(&dScores, &dScores, scalarScale);
-
-            //4b)
-            MatMul_Strided<TransposeMode::None>(&dQh,
-                                                &dScores,
-                                                &KeyHead,
-                                                dT,1u,
-                                                dC,1u,
-                                                headDim,1u);
-            //4a)
-            MatMul_Strided<TransposeMode::Left>(&dKh,
-                                                &dScores,
-                                                &QueryHead,
-                                                dT,1u,
-                                                dC,1u,
-                                                headDim,1u);
         }
+        // 5) Softmax gradient, causal mask and scaling for every head in one pass.
+        auto probsRef = _blob->AcquireMatrix("AttentionProbsAll");
+        AttentionScoresBackwards(dScoresAll, probsRef.get(), dAttAll, scalarScale);
+        MatMul_Batched<TransposeMode::None>(dQhAll, dScoresAll, &kHeads,
+                                            gradientStrides, scoreStrides, featureStrides);
+        MatMul_Batched<TransposeMode::Left>(dKhAll, dScoresAll, &qHeads,
+                                            gradientStrides, scoreStrides, featureStrides);
         // 3) Merge all head gradients back to packed QKV layout with a single op.
         MergeQKV(qkvGrad, dQhAll, dKhAll, dVhAll);
 
@@ -674,6 +644,20 @@ class CausalSelfAttentionLayer : public Layer<T, Mat>
     }
 
     private:
+    void BindHeadStorage(Datablob<T, Mat>* blob, const std::string& key,
+                         Mat* storage, uint32_t head, uint32_t batches, bool rebind)
+    {
+        MatrixManager<T, Mat>& inst = MatrixManager<T, Mat>::Instance();
+        Mat* oldView = blob->GetMatrix(key);
+        if (!rebind && oldView && inst.IsSkeleton(oldView)
+            && oldView->GetDimsZ() == batches) return;
+        if (oldView) inst.RemoveMatrix(oldView);
+        auto view = inst.GetSkeleton(key);
+        storage->GetSliceZ(view.get(), head * batches);
+        view->SetDims({storage->GetDimsX(), storage->GetDimsY(), batches});
+        blob->Set(key, view);
+    }
+
     struct AttentionDims
     {
         uint32_t C_EmbedDims = 0u;

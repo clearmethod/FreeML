@@ -109,6 +109,38 @@ void SoftmaxBackwards(MatrixBase<T>* out, MatrixBase<T>* softmaxOut, MatrixBase<
     }
 }
 
+// Row-major square attention planes; Z contains heads and/or batches.
+// Probs are pre-dropout softmax outputs; grad has already passed dropout backward.
+template<class T>
+void AttentionScoresBackwards(MatrixBase<T>* out, MatrixBase<T>* probs,
+                              MatrixBase<T>* grad, MatrixBase<T>* scale)
+{
+    assert(out && probs && grad && scale);
+    assert(out->GetDimsX() == out->GetDimsY());
+    assert(out->GetDimsX() == probs->GetDimsX() && out->GetDimsY() == probs->GetDimsY()
+           && out->GetDimsZ() == probs->GetDimsZ());
+    assert(out->GetDimsX() == grad->GetDimsX() && out->GetDimsY() == grad->GetDimsY()
+           && out->GetDimsZ() == grad->GetDimsZ());
+    assert(scale->GetElementCount() == 1u);
+    const uint32_t width = out->GetDimsX();
+    const uint32_t rows = out->GetDimsY() * out->GetDimsZ();
+    const T* p = probs->DataRead();
+    const T* g = grad->DataRead();
+    const T factor = scale->DataRead()[0];
+    T* result = out->DataWrite();
+    for (uint32_t row = 0; row < rows; ++row)
+    {
+        const uint32_t offset = row * width;
+        const uint32_t query = row % width;
+        T dot = T(0);
+        for (uint32_t col = 0; col < width; ++col)
+            dot += p[offset + col] * g[offset + col];
+        for (uint32_t col = 0; col <= query; ++col)
+            result[offset + col] = (p[offset + col] * (g[offset + col] - dot)) * factor;
+        std::fill(result + offset + query + 1u, result + offset + width, T(0));
+    }
+}
+
 enum class TriangleDirection { Lower, Upper };
 template<class T>
 void TriangleMatrix(MatrixBase<T>* _out, TriangleDirection _dir, T trueVal, T falseVal)
@@ -470,6 +502,7 @@ void TransposeMat(MatrixBase<T>* _out, MatrixBase<T>* _in)
 template<class T>
 void Add(MatrixBase<T>* _out, MatrixBase<T>* _L, MatrixBase<T>* _R)
 {
+    assert(_L->GetElementCount() == _R->GetElementCount());
     for (uint32_t i = 0; i < _R->GetElementCount(); i++)
     {
         const T lhs = _L->DataRead()[i];
@@ -484,11 +517,20 @@ void LayerNormOp(MatrixBase<T>* _out,
                  MatrixBase<T>* _gamma,
                  MatrixBase<T>* _beta = nullptr,
                  MatrixBase<T>* _xHat = nullptr,
-                 T _eps = static_cast<T>(1e-5))
+                 T _eps = static_cast<T>(1e-5),
+                 MatrixBase<T>* _invStd = nullptr)
 {
     assert(_out);
     assert(_in);
     assert(_gamma);
+    if (_invStd)
+    {
+        assert(_xHat);
+        assert(_invStd->GetDimsX() == 1u);
+        assert(_invStd->GetDimsY() == _in->GetDimsY());
+        assert(_invStd->GetDimsZ() == _in->GetDimsZ());
+    }
+
     assert(_out->GetDimsX() == _in->GetDimsX());
     assert(_out->GetDimsY() == _in->GetDimsY());
     assert(_out->GetDimsZ() == _in->GetDimsZ());
@@ -516,6 +558,8 @@ void LayerNormOp(MatrixBase<T>* _out,
     T* outPtr = _out->DataWrite();
     T* xHatPtr = _xHat ? _xHat->DataWrite() : nullptr;
 
+    T* invStdPtr = _invStd ? _invStd->DataWrite() : nullptr;
+
     for (uint32_t row = 0; row < rows; ++row)
     {
         const uint32_t rowOffset = row * cols;
@@ -534,6 +578,7 @@ void LayerNormOp(MatrixBase<T>* _out,
         }
         var *= invCols;
         const T invStd = static_cast<T>(1) / std::sqrt(var + _eps);
+        if (invStdPtr) invStdPtr[row] = invStd;
 
         for (uint32_t col = 0; col < cols; ++col)
         {
@@ -556,12 +601,21 @@ void LayerNormBackwardsOp(MatrixBase<T>* _dX,
                           MatrixBase<T>* _dGamma,
                           MatrixBase<T>* _dBeta = nullptr,
                           MatrixBase<T>* _xHat = nullptr,
-                          T _eps = static_cast<T>(1e-5))
+                          T _eps = static_cast<T>(1e-5),
+                          MatrixBase<T>* _invStd = nullptr)
 {
     assert(_dX);
     assert(_dY);
     assert(_in);
     assert(_gamma);
+    if (_invStd)
+    {
+        assert(_xHat);
+        assert(_invStd->GetDimsX() == 1u);
+        assert(_invStd->GetDimsY() == _in->GetDimsY());
+        assert(_invStd->GetDimsZ() == _in->GetDimsZ());
+    }
+
     assert(_dGamma);
     assert(_dX->GetDimsX() == _in->GetDimsX());
     assert(_dX->GetDimsY() == _in->GetDimsY());
@@ -589,7 +643,7 @@ void LayerNormBackwardsOp(MatrixBase<T>* _dX,
     const uint32_t cols = _in->GetDimsX();
     const T invCols = static_cast<T>(1) / static_cast<T>(cols);
 
-    const T* inPtr = _in->DataRead();
+    const T* inPtr = (_invStd && _xHat) ? nullptr : _in->DataRead();
     const T* dYPtr = _dY->DataRead();
     const T* gPtr = _gamma->DataRead();
     T* dXPtr = _dX->DataWrite();
@@ -655,6 +709,27 @@ void LayerNormBackwardsOp(MatrixBase<T>* _dX,
                 }
             }
         }
+    }
+
+    if (_invStd && _xHat)
+    {
+        const T* invStdPtr = _invStd->DataRead();
+        const T* hatPtr = _xHat->DataRead();
+        for (uint32_t row = 0; row < rowsTotal; ++row)
+        {
+            const uint32_t offset = row * cols;
+            T sumGrad = T(0), sumGradHat = T(0);
+            for (uint32_t col = 0; col < cols; ++col)
+            {
+                const T grad = dYPtr[offset + col] * gPtr[col];
+                sumGrad += grad;
+                sumGradHat += grad * hatPtr[offset + col];
+            }
+            for (uint32_t col = 0; col < cols; ++col)
+                dXPtr[offset + col] = invStdPtr[row] * (dYPtr[offset + col] * gPtr[col]
+                    - sumGrad * invCols - hatPtr[offset + col] * sumGradHat * invCols);
+        }
+        return;
     }
 
     for (uint32_t row = 0; row < rowsTotal; ++row)
@@ -855,11 +930,12 @@ void PerElementMul(MatrixBase<T>* _out, MatrixBase<T>* _L, MatrixBase<T>* _R)
 
 template<class T>
 void PerElementMul(MatrixBase<T>* _out,
-                   const MatrixBase<T>* _L,
-                   const MatrixBase<T>* _R,
+                   MatrixBase<T>* _L,
+                   MatrixBase<T>* _R,
                    ThreadPool* _threadPool,
                    uint32_t batchSize = 128)
 {
+    // DataRead can map GPU staging buffers, so the input objects must be mutable.
     const uint32_t elemCount = _R->GetElementCount();
     if (elemCount == 0) return;
 
@@ -909,9 +985,11 @@ void MapFunction_Zero(MatrixBase<T>* _out, Func F)
 template<class T, class U, class Func>
 void MapFunction(MatrixBase<T>* _out, MatrixBase<U>* _in, Func F)
 {
+    const U* input = _in->DataRead();
+    T* output = _out->DataWrite();
     for (uint32_t i = 0; i < _in->GetElementCount(); i++)
     {
-        _out->DataWrite()[i] = F(_in->DataWrite()[i]);
+        output[i] = F(input[i]);
     }
 }
 
@@ -921,15 +999,18 @@ void MapFunction(MatrixBase<T>* _out, MatrixBase<U>* _in, Func F, ThreadPool* _t
     const uint32_t elemCount = _out->GetElementCount();
     if(elemCount == 0) return;
 
+    // GPU-backed matrices map and synchronize on the caller thread only.
+    const U* inPtr = _in->DataRead();
+    T* outPtr = _out->DataWrite();
     uint32_t i = 0;
     const uint32_t jobCount = elemCount % batchSize == 0 ? (elemCount / batchSize) : (elemCount / batchSize) + 1;
     std::latch latchCounter(jobCount);
 
-    auto worker = [&latchCounter, &_out, &_in, &F](uint32_t _start, uint32_t _end)
+    auto worker = [outPtr, inPtr, &F](uint32_t _start, uint32_t _end)
         {
             for (uint32_t k = _start; k < _end; k++)
             {
-                _out->DataWrite()[k] = F(_in->DataRead()[k]);
+                outPtr[k] = F(inPtr[k]);
             }
         };
 
@@ -1014,6 +1095,29 @@ void GeluDerivtiveMat(MatrixBase<T>* _out, MatrixBase<T>* _in)
         const T expTerm = std::exp(static_cast<T>(-0.5) * x * x);
         _out->DataWrite()[i] = static_cast<T>(0.5) * (static_cast<T>(1) + erfTerm)
                                + (x * expTerm) / sqrt2pi;
+    }
+}
+
+// Fused activation gradient. Output storage must be distinct from both inputs.
+template<class T>
+void GeluBackwards(MatrixBase<T>* out, MatrixBase<T>* input, MatrixBase<T>* grad)
+{
+    assert(out && input && grad);
+    assert(out->GetDimsX() == input->GetDimsX() && out->GetDimsY() == input->GetDimsY()
+           && out->GetDimsZ() == input->GetDimsZ());
+    assert(out->GetDimsX() == grad->GetDimsX() && out->GetDimsY() == grad->GetDimsY()
+           && out->GetDimsZ() == grad->GetDimsZ());
+    const T sqrt2 = std::sqrt(static_cast<T>(2));
+    const T sqrt2pi = std::sqrt(static_cast<T>(2) * static_cast<T>(3.14159265358979323846));
+    const T* xPtr = input->DataRead();
+    const T* gPtr = grad->DataRead();
+    T* result = out->DataWrite();
+    for (uint32_t i = 0; i < input->GetElementCount(); ++i)
+    {
+        const T x = xPtr[i];
+        const T derivative = static_cast<T>(0.5) * (static_cast<T>(1) + std::erf(x / sqrt2))
+                             + x * std::exp(static_cast<T>(-0.5) * x * x) / sqrt2pi;
+        result[i] = gPtr[i] * derivative;
     }
 }
 
@@ -1628,6 +1732,3 @@ void ReparameterizeMat(MatrixBase<T>* _latent, MatrixBase<T>* _eps,
 }
 
 #include "MatrixBase_Mul.h"
-
-
-

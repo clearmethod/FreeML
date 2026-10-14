@@ -21,7 +21,7 @@
 #ifdef _WIN32
 using MatType = MatrixDX11<T>;
 #else
-using MatType = MatrixCPU<PRECISION>;
+using MatType = MatrixCPU<T>;
 #endif
 
 int main()

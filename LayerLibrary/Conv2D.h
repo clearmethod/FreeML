@@ -80,7 +80,7 @@ Datablob<T, Mat>* InitConv2DBlob(   uint32_t       _inChannels,
     {
         for (uint32_t i = 0; i < _outChannels; ++i)
         {
-            Mat* kernel = blob->GetMatrix<Mat>("KernelWeights_" + std::to_string(i));
+            Mat* kernel = blob->GetMatrix("KernelWeights_" + std::to_string(i));
             if (kernel)
             {
                 const float stddev = 0.02f;
@@ -93,7 +93,7 @@ Datablob<T, Mat>* InitConv2DBlob(   uint32_t       _inChannels,
     {
         for (uint32_t i = 0; i < _outChannels; ++i)
         {
-            Mat* kernel = blob->GetMatrix<Mat>("KernelWeights_" + std::to_string(i));
+            Mat* kernel = blob->GetMatrix("KernelWeights_" + std::to_string(i));
             if (kernel)
             {
                 Fill(kernel, static_cast<T>(0));

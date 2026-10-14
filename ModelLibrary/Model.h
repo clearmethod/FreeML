@@ -3,6 +3,12 @@
 #include <MatrixLibrary/MatrixBase.h>
 #include <MatrixLibrary/MatrixManager.h>
 #include <MatrixLibrary/MatrixBase_Functions.h>
+#ifdef __APPLE__
+#include <MatrixLibrary/GPU/Metal/MatrixMetal.h>
+#endif
+#ifdef _WIN32
+#include <MatrixLibrary/GPU/DirectX11/MatrixDX11.h>
+#endif
 
 #include <OptimiserLibrary/Optimiser.h>
 #include <LossLibrary/DirectLoss.h>
@@ -24,6 +30,10 @@
 #include <unordered_set>
 #include <vector>
 #include <utility>
+#include <type_traits>
+#include <stdexcept>
+#include <algorithm>
+#include <cmath>
 
 template<typename T, class Mat = MatrixCPU<T>>
 class Model
@@ -45,6 +55,7 @@ class Model
 
     void DeleteAllLayersAndBlobs()
     {
+        ResetGradientAccumulation();
         for (const auto& [layer, blob] : m_layersAndBlobs)
         {
             delete blob;
@@ -90,6 +101,8 @@ class Model
 
     bool Save()
     {
+        // Checkpoints contain completed updates, never a partial gradient window.
+        FlushAccumulatedGradients();
         SaveLoader<T,Mat> sl;
         std::filesystem::path path = std::filesystem::current_path() / sl.sanitize_folder_name(GetName());
         sl.EnsureEmptyDir(path);
@@ -171,6 +184,11 @@ class Model
         }
 
         ModelGuide mg = LoadModelGuide(path);
+        if(mg.layers.size() == 0)
+        {
+            return false;
+        }
+
         for (const auto& layerEntry : mg.layers)
         {
             Datablob<T, Mat>* blob = new Datablob<T, Mat>();
@@ -630,6 +648,18 @@ class Model
         }
     }
 
+    // Configure before Run(); printing cannot synchronize past measurements.
+    void SetTimingSynchronization(bool enabled)
+    {
+        if (m_syncLayerTimings == enabled)
+            return;
+        m_syncLayerTimings = enabled;
+        // Keep averages from different timing modes separate.
+        m_timingsForward.clear();
+        m_timingsBackward.clear();
+        m_timingsOther.clear();
+    }
+
     void PrintTimings()
     {
         if (!m_enableTiming)
@@ -649,6 +679,8 @@ class Model
         }
 
         LOG_INFO() << "Timing summary for model: " << m_name;
+        LOG_INFO() << (m_syncLayerTimings ? "Layer timing: GPU completion included."
+                                         : "Layer timing: asynchronous calls; GPU waits may be charged to later layers.");
         LOG_INFOF("%-*s  %12s %12s %6s  %12s %12s %6s",
                   static_cast<int>(maxNameLen), "Layer",
                   "FwdAvg(ms)", "FwdLast(ms)", "FwdN",
@@ -779,10 +811,12 @@ class Model
         // Do forward pass.
         for(auto* layer : m_executionOrder)
         {
+            SynchronizeLayerTiming();
             Timer forwardTimer;
             forwardTimer.Start();
             //LOG_INFO() << layer->GetString(m_layersAndBlobs[layer]) << ": Forwards";
 			layer->Forward(m_layersAndBlobs[layer]);
+            SynchronizeLayerTiming();
             double elapsed = forwardTimer.Elapsed();
             AddTiming(layer, elapsed, m_timingsForward);
         }
@@ -823,10 +857,12 @@ class Model
             {
                 Layer<T, Mat>* layer = *it;
                 //LOG_INFO() << "Running backwards layer: " << layer->GetName();
+                SynchronizeLayerTiming();
                 Timer forwardTimer;
                 forwardTimer.Start();
                 //LOG_INFO() << layer->GetString(m_layersAndBlobs[layer]) << ": Backwards";
                 layer->Backwards(m_layersAndBlobs[layer]);
+                SynchronizeLayerTiming();
                 double elapsed = forwardTimer.Elapsed();
                 AddTiming(layer, elapsed, m_timingsBackward);
             }
@@ -835,39 +871,7 @@ class Model
             {
                 Timer optTimer;
                 optTimer.Start();
-                // Update weights with gradients, aggregating tied parameters.
-                std::unordered_map<Mat*, Mat*> gradAccum;
-                for (auto* layer : m_executionOrder)
-                {
-                    Datablob<T, Mat>* data = m_layersAndBlobs[layer];
-                    std::vector<MatrixRef>* trainableParams = layer->GetWeights(data);
-                    std::vector<MatrixRef>* grads = layer->GetGradients(data);
-
-                    assert(trainableParams->size() == grads->size());
-
-                    for (size_t i = 0; i < grads->size(); ++i)
-                    {
-                        Mat* grad = (*grads)[i].get();
-                        Mat* trainable = (*trainableParams)[i].get();
-                        assert(grad);
-                        assert(trainable);
-
-                        auto it = gradAccum.find(trainable);
-                        if (it == gradAccum.end())
-                        {
-                            gradAccum.emplace(trainable, grad);
-                        }
-                        else
-                        {
-                            Add(it->second, it->second, grad);
-                        }
-                    }
-                }
-
-                for (const auto& entry : gradAccum)
-                {
-                    m_optimiser->Step(entry.first, entry.second);
-                }
+                UpdateParameters();
                 double elapsed = optTimer.Elapsed();
                 AddTimingOther(m_optimiser->GetName(), elapsed, m_timingsOther);
             }
@@ -1025,7 +1029,69 @@ class Model
 
     void SetOptimiser( Optimiser<T,Mat>* _opt)
     {
+        FlushAccumulatedGradients();
         m_optimiser = _opt;
+    }
+
+    // Each target-bearing Run contributes one equally weighted gradient sample.
+    // Changing the window size first applies any pending samples.
+    void SetGradientAccumulationSteps(uint32_t steps)
+    {
+        if (steps == 0u)
+            throw std::invalid_argument("Gradient accumulation steps must be positive.");
+        if (steps == m_gradientAccumulationSteps)
+            return;
+        FlushAccumulatedGradients();
+        ResetGradientAccumulation();
+        m_gradientAccumulationSteps = steps;
+    }
+
+    uint32_t GetGradientAccumulationSteps() const { return m_gradientAccumulationSteps; }
+    uint32_t GetPendingGradientPasses() const { return m_pendingGradientPasses; }
+
+    // Zero disables clipping. Applies to the combined, averaged gradients.
+    void SetGradientClipNorm(float maximumNorm)
+    {
+        if (!std::isfinite(maximumNorm) || maximumNorm < 0.0f)
+            throw std::invalid_argument("Gradient clip norm must be finite and nonnegative.");
+        m_gradientClipNorm = maximumNorm;
+    }
+
+    float GetGradientClipNorm() const { return m_gradientClipNorm; }
+
+    // Opt in to the per-parameter settings declared by layers.
+    void SetSelectiveWeightDecay(bool enabled)
+    {
+        if (enabled == m_selectiveWeightDecay) return;
+        FlushAccumulatedGradients();
+        ResetGradientAccumulation();
+        m_selectiveWeightDecay = enabled;
+    }
+
+    bool GetSelectiveWeightDecay() const { return m_selectiveWeightDecay; }
+
+    // Apply a partial window using its actual sample count. An empty flush is a no-op.
+    void FlushAccumulatedGradients()
+    {
+        if (m_pendingGradientPasses == 0u)
+            return;
+        const float inverseCount = 1.0f / static_cast<float>(m_pendingGradientPasses);
+        for (auto& [parameter, gradient] : m_accumulatedGradients)
+            Scale(gradient.get(), gradient.get(), inverseCount);
+        ClipGradients(m_accumulatedGradients);
+        for (auto& [parameter, gradient] : m_accumulatedGradients)
+            m_optimiser->Step(parameter, gradient.get(),
+                m_selectiveWeightDecay ? m_accumulatedDecayScales.at(parameter) : 1.0f);
+        m_pendingGradientPasses = 0u;
+        // The first pass of the next window overwrites each accumulator.
+    }
+
+    // Explicitly discard pending samples and release accumulator storage.
+    void ResetGradientAccumulation()
+    {
+        m_pendingGradientPasses = 0u;
+        m_accumulatedGradients.clear();
+        m_accumulatedDecayScales.clear();
     }
 
     Layer<T,Mat>* GetFinalOutputLayer()
@@ -1113,7 +1179,22 @@ class Model
     std::map     <Layer<T, Mat>*, Datablob<T, Mat>*>    m_layersAndBlobs;
     std::map     <Layer<T,Mat>*,  std::vector< std::pair<Layer<T,Mat>*, std::pair<uint32_t, uint32_t>> > > m_layerDependencies;
 
+    void SynchronizeLayerTiming()
+    {
+        if (!m_enableTiming || !m_syncLayerTimings)
+            return;
+#ifdef __APPLE__
+        if constexpr (std::is_same_v<Mat, MatrixMetal<T>>)
+            MetalManager::Instance()->WaitForGPU();
+#endif
+#ifdef _WIN32
+        if constexpr (std::is_same_v<Mat, MatrixDX11<T>>)
+            DirectX11Manager::Instance()->WaitForGPU();
+#endif
+    }
+
     bool                                                 m_enableTiming = true;
+    bool                                                 m_syncLayerTimings = false;
     std::map     <Layer<T, Mat>*, std::vector<double>>   m_timingsForward;
     std::map     <Layer<T, Mat>*, std::vector<double>>   m_timingsBackward;
     std::map     <std::string, std::vector<double>>      m_timingsOther;
@@ -1122,6 +1203,123 @@ class Model
     std::string m_name = "No Name Set";
 
     private:
+    uint32_t m_gradientAccumulationSteps = 1u;
+    uint32_t m_pendingGradientPasses = 0u;
+    float m_gradientClipNorm = 0.0f;
+    bool m_selectiveWeightDecay = false;
+    std::unordered_map<Mat*, MatrixRef> m_accumulatedGradients;
+    std::unordered_map<Mat*, float> m_accumulatedDecayScales;
+
+    template<class GradientMap>
+    void ClipGradients(GradientMap& gradients)
+    {
+        if (m_gradientClipNorm == 0.0f)
+            return;
+        auto pointer = [](auto& gradient) -> Mat* {
+            if constexpr (std::is_pointer_v<std::decay_t<decltype(gradient)>>)
+                return gradient;
+            else
+                return gradient.get();
+        };
+        // Read each unique parameter's gradient once. This deliberately uses
+        // CPU reduction for now; GPU mappings are released before scaling.
+        double squaredNorm = 0.0;
+        for (auto& [parameter, entry] : gradients)
+        {
+            Mat* gradient = pointer(entry);
+            const T* values = gradient->DataRead();
+            for (uint32_t i = 0; i < gradient->GetElementCount(); ++i)
+            {
+                const double value = static_cast<double>(values[i]);
+                squaredNorm += value * value;
+            }
+            if constexpr (requires { gradient->Unmap(); })
+                gradient->Unmap();
+        }
+        if (!std::isfinite(squaredNorm))
+            throw std::runtime_error("Cannot clip non-finite gradients.");
+        const float scale = static_cast<float>(std::min(1.0,
+            double(m_gradientClipNorm) / (std::sqrt(squaredNorm) + 1e-6)));
+        if (scale < 1.0f)
+            for (auto& [parameter, gradient] : gradients)
+                Scale(pointer(gradient), pointer(gradient), scale);
+    }
+
+    void UpdateParameters()
+    {
+        // Update weights with gradients, aggregating tied parameters.
+        std::unordered_map<Mat*, Mat*> gradAccum;
+        std::unordered_map<Mat*, float> decayScales;
+        for (auto* layer : m_executionOrder)
+        {
+            Datablob<T, Mat>* data = m_layersAndBlobs[layer];
+            std::vector<MatrixRef>* trainableParams = layer->GetWeights(data);
+            std::vector<MatrixRef>* grads = layer->GetGradients(data);
+
+            assert(trainableParams->size() == grads->size());
+
+            for (size_t i = 0; i < grads->size(); ++i)
+            {
+                Mat* grad = (*grads)[i].get();
+                Mat* trainable = (*trainableParams)[i].get();
+                assert(grad);
+                assert(trainable);
+
+                if (m_selectiveWeightDecay)
+                {
+                    const float scale = layer->GetWeightDecayScale(data, trainable);
+                    if (!std::isfinite(scale) || scale < 0.0f)
+                        throw std::invalid_argument("Weight-decay scale must be finite and nonnegative.");
+                    const auto [entry, inserted] = decayScales.emplace(trainable, scale);
+                    if (!inserted && entry->second != scale)
+                        throw std::invalid_argument("Tied parameters have conflicting weight-decay settings.");
+                }
+
+                auto it = gradAccum.find(trainable);
+                if (it == gradAccum.end())
+                {
+                    gradAccum.emplace(trainable, grad);
+                }
+                else
+                {
+                    Add(it->second, it->second, grad);
+                }
+            }
+        }
+
+        if (m_gradientAccumulationSteps == 1u)
+        {
+            ClipGradients(gradAccum);
+            for (const auto& [parameter, gradient] : gradAccum)
+                m_optimiser->Step(parameter, gradient,
+                    m_selectiveWeightDecay ? decayScales.at(parameter) : 1.0f);
+            return;
+        }
+
+        auto& manager = MatrixManager<T, Mat>::Instance();
+        for (const auto& [parameter, gradient] : gradAccum)
+        {
+            auto& accumulator = m_accumulatedGradients[parameter];
+            if (!accumulator)
+                accumulator = manager.AllocateMatrix(gradient->GetDims(), "AccumulatedGradient");
+            if (m_pendingGradientPasses == 0u)
+            {
+                Copy(accumulator.get(), gradient);
+                if (m_selectiveWeightDecay)
+                    m_accumulatedDecayScales[parameter] = decayScales.at(parameter);
+            }
+            else
+            {
+                if (m_selectiveWeightDecay && m_accumulatedDecayScales.at(parameter) != decayScales.at(parameter))
+                    throw std::invalid_argument("Weight-decay settings changed during gradient accumulation.");
+                Add(accumulator.get(), accumulator.get(), gradient);
+            }
+        }
+        ++m_pendingGradientPasses;
+        if (m_pendingGradientPasses == m_gradientAccumulationSteps)
+            FlushAccumulatedGradients();
+    }
+
     void EnsureInputMatrix(const Dims3D& dims)
     {
         MatrixManager<T, Mat>& inst = MatrixManager<T, Mat>::Instance();

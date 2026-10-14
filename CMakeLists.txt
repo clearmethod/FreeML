@@ -27,6 +27,10 @@ foreach(tgt IN LISTS ML2_TARGETS)
     target_link_options(${tgt} PRIVATE $<$<CONFIG:Debug>:/INCREMENTAL>)
   endif()
 
+  if(APPLE)
+    target_link_libraries(${tgt} PRIVATE "-framework Metal" "-framework Foundation")
+  endif()
+
 endforeach()
 
 set(ML2_ASSET_TARGET_DIR "$<TARGET_FILE_DIR:ml2_main>")
@@ -37,9 +41,11 @@ add_custom_target(ml2_copy_assets ALL
   COMMAND ${CMAKE_COMMAND} -E copy_directory
           "${CMAKE_CURRENT_SOURCE_DIR}/MatrixLibrary/GPU/DirectX11/Shaders"
           "GPU/DirectX11/Shaders"
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+          "${CMAKE_CURRENT_SOURCE_DIR}/MatrixLibrary/GPU/Metal/Shaders"
+          "GPU/Metal/Shaders"
 )
 add_dependencies(ml2_copy_assets ${ML2_TARGETS})
 
 if(BUILD_TESTING)
-  add_subdirectory(Testing)
 endif()

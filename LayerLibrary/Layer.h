@@ -108,6 +108,30 @@ public:
         Datablob<T,Mat>* data;
     };
 
+    // Composite layers delegate to the child owning each parameter. Leaf
+    // parameters receive full decay unless their layer explicitly opts out.
+    virtual float GetWeightDecayScale(Datablob<T, Mat>* blob, Mat* parameter)
+    {
+        std::vector<sublayerinfo> children;
+        GetSublayerPairs(children, blob);
+        float scale = 1.0f;
+        bool found = false;
+        for (const auto& child : children)
+        {
+            if (!child.layer || !child.data) continue;
+            for (const auto& weight : *child.layer->GetWeights(child.data))
+            {
+                if (weight.get() != parameter) continue;
+                const float childScale = child.layer->GetWeightDecayScale(child.data, parameter);
+                if (found && scale != childScale)
+                    throw std::invalid_argument("Tied parameters have conflicting weight-decay settings.");
+                scale = childScale;
+                found = true;
+            }
+        }
+        return scale;
+    }
+
     virtual std::string GetInputName(uint32_t _index = 0)
     {
         return "Input_" + std::to_string(_index);

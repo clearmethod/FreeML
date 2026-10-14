@@ -130,6 +130,11 @@ class DropoutLayer : public Layer<T, Mat>
         Mat* output = outputRef.get();
 
         uint32_t isTraining = _blob->GetUInt("TrainingEnabled");
+        if (!isTraining || _blob->GetFloat("Probability") == 0.0f)
+        {
+            Copy(output, input);
+            return;
+        }
         if(isTraining)
         {
             typename MatrixManager<T, Mat>::MatrixRef maskRef = _blob->AcquireMatrix("Mask");
@@ -155,6 +160,11 @@ class DropoutLayer : public Layer<T, Mat>
         Mat* errorIn = errorInRef.get();
         typename MatrixManager<T, Mat>::MatrixRef errorOutRef = _blob->AcquireMatrix("ErrorOutput_0");
         Mat* errorOut = errorOutRef.get();
+        if (_blob->GetUInt("TrainingEnabled") == 0u || _blob->GetFloat("Probability") == 0.0f)
+        {
+            Copy(errorOut, errorIn);
+            return;
+        }
         typename MatrixManager<T, Mat>::MatrixRef maskRef = _blob->AcquireMatrix("Mask");
         Mat* mask = maskRef.get();
         typename MatrixManager<T, Mat>::MatrixRef scaleRef = _blob->AcquireMatrix("ScalarScale");

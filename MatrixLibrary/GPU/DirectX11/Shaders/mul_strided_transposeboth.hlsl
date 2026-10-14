@@ -68,9 +68,9 @@ void CSMain(uint3 dispatchThreadId : SV_DispatchThreadID)
     if (right_rowStride == 0) right_rowStride = right_dimx;
     if (right_colStride == 0) right_colStride = 1u;
 
-    uint out_planeStride = out_rowStride * out_dimy;
-    uint left_planeStride = left_rowStride * left_dimy;
-    uint right_planeStride = right_rowStride * right_dimy;
+    uint out_planeStride = out_optionalParams[0].z;
+    uint left_planeStride = left_optionalParams[0].z;
+    uint right_planeStride = right_optionalParams[0].z;
 
     uint out_base = out_offset + out_z * out_planeStride;
     uint left_base = left_offset + out_z * left_planeStride;

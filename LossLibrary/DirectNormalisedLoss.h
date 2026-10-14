@@ -37,6 +37,6 @@ class DirectNormalisedLoss : public LossBase<T, MatT>
         {
             sum += std::abs(data[i]);
         }
-        MapFunction(out, out, [sum](T& v){ return v / sum; });
+        MapFunction(out, out, [sum](T v){ return v / sum; });
     }
 };

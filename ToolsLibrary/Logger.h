@@ -168,6 +168,7 @@ private:
             std::ostream& os = (lvl == Level::Info) ? static_cast<std::ostream&>(std::cout)
                                                     : static_cast<std::ostream&>(std::cerr);
             os << prefix << text << '\n';
+            os.flush();
         }
 
         if (GetFileEnabled()) 
