@@ -6,6 +6,9 @@
 #include <MatrixLibrary/MatrixBase_Functions.h>
 #include <MatrixLibrary/GPU/DirectX11/MatrixDX11_Functions.h>
 #include <MatrixLibrary/CPU/MatrixCPU.h>
+#ifdef __APPLE__
+#include <MatrixLibrary/GPU/Metal/MatrixMetal_Functions.h>
+#endif
 
 #include <cmath>
 #include <functional>
@@ -99,27 +102,7 @@ class DropoutLayer : public Layer<T, Mat>
         assert(_mask);
         assert(_zero);
         assert(_one);
-        const uint32_t elemCount = _mask->GetElementCount();
-        if (elemCount == 0) return;
-
-        if (_prob <= 0.0f)
-        {
-            Fill(_mask, _one);
-            return;
-        }
-
-        if (_prob >= 1.0f)
-        {
-            Fill(_mask, _zero);
-            return;
-        }
-
-        T* outPtr = _mask->DataWrite();
-        for (uint32_t i = 0; i < elemCount; ++i)
-        {
-            const float r = RandomUtils::random_uniform_buffered();
-            outPtr[i] = (r < _prob) ? T(0) : T(1);
-        }
+        DropoutMask(_mask, _prob);
     }
 
     void Forward(Datablob<T, Mat>* _blob) override

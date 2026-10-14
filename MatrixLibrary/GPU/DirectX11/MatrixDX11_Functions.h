@@ -2880,6 +2880,68 @@ static inline uint32_t PackFloat(T value)
 // Fill all elements of _out with a scalar float value passed via optional params.
 // Avoids allocating a separate GPU buffer for the value.
 template<class T>
+void DropoutMask(MatrixDX11<T>* _out, float probability,
+                 uint32_t seed = RandomUtils::NextSeed())
+{
+    assert(_out && std::isfinite(probability));
+    if (_out->GetElementCount() == 0u) return;
+    DirectX11Manager::Instance()->DumpInfoQueueErrors();
+
+    _out->Unmap();
+
+    DirectX11Manager* manager = _out->m_gInstance;
+    ID3D11DeviceContext* context = manager ? manager->GetContext() : nullptr;
+    ID3D11ComputeShader* shader  = manager ? manager->GetShader("dropout_mask") : nullptr;
+    if (!context || !shader)
+    {
+        return;
+    }
+
+    if (!SyncCBuffer(_out))
+    {
+        return;
+    }
+
+    const uint32_t valParam[2] = { PackFloat(probability), seed };
+    if (!manager->SetCBufferOptionalParams(_out->m_dataHandles.m_cbufferHandle, valParam, 2u))
+    {
+        return;
+    }
+
+    ID3D11Buffer* outCBuffer = manager->GetCBuffer(_out->m_dataHandles.m_cbufferHandle);
+    if (!outCBuffer)
+    {
+        return;
+    }
+
+    ID3D11UnorderedAccessView* outUAV = manager->GetBufferUAV(_out->m_dataHandles.m_bufferHandle);
+    if (!outUAV)
+    {
+        return;
+    }
+
+    context->CSSetShader(shader, nullptr, 0u);
+    ID3D11Buffer* cbs[] = { outCBuffer };
+    context->CSSetConstantBuffers(0u, 1u, cbs);
+    ID3D11UnorderedAccessView* uavs[] = { outUAV };
+    context->CSSetUnorderedAccessViews(0u, 1u, uavs, nullptr);
+
+    const uint32_t elementCount    = _out->GetElementCount();
+    const uint32_t threadsPerGroup = 256u;
+    const uint32_t groupCount      = (elementCount + threadsPerGroup - 1u) / threadsPerGroup;
+    context->Dispatch(groupCount, 1u, 1u);
+
+    ID3D11UnorderedAccessView* nullUAVs2[] = { nullptr };
+    context->CSSetUnorderedAccessViews(0u, 1u, nullUAVs2, nullptr);
+    context->CSSetShader(nullptr, nullptr, 0u);
+
+    DirectX11Manager::Instance()->DumpInfoQueueErrors();
+
+    if (GPUSyncCalls)
+        DirectX11Manager::Instance()->WaitForGPU();
+}
+
+template<class T>
 void Fill(MatrixDX11<T>* _out, float _val)
 {
     assert(_out);
@@ -3701,6 +3763,60 @@ void ReparameterizeBackwardsMat(MatrixDX11<T>* _muGrad,  MatrixDX11<T>* _lvGrad,
 
     if (GPUSyncCalls)
         DirectX11Manager::Instance()->WaitForGPU();
+}
+
+template<class T>
+void ClipGradientNorm(const std::vector<MatrixDX11<T>*>& gradients, float maximumNorm,
+                      GradientClipWorkspace<T,MatrixDX11<T>>& workspace)
+{
+    if (!std::isfinite(maximumNorm) || maximumNorm < 0.0f)
+        throw std::invalid_argument("Gradient clip norm must be finite and nonnegative.");
+    if (maximumNorm == 0.0f) return;
+    const uint32_t partialCount = workspace.Prepare(gradients);
+    if (partialCount == 0u) return;
+    auto* manager = workspace.partials->m_gInstance;
+    auto* context = manager->GetContext();
+    auto* reduceShader = manager->GetShader("gradient_norm_partials");
+    auto* scaleShader = manager->GetShader("gradient_norm_scale");
+    if (!context || !reduceShader || !scaleShader)
+        throw std::runtime_error("Missing GPU gradient norm pipeline.");
+    workspace.partials->Unmap(); workspace.scale->Unmap();
+    if (!SyncCBuffer(workspace.partials.get()) || !SyncCBuffer(workspace.scale.get()))
+        throw std::runtime_error("Cannot bind gradient norm scratch buffers.");
+    // Unbind each dispatch's resources before using its output as an SRV.
+    auto dispatch = [&](auto* shader, MatrixDX11<T>* output, MatrixDX11<T>* input,
+                        uint32_t x, uint32_t y) {
+        ID3D11Buffer* cbs[] = {manager->GetCBuffer(output->m_dataHandles.m_cbufferHandle),
+                              manager->GetCBuffer(input->m_dataHandles.m_cbufferHandle)};
+        ID3D11UnorderedAccessView* uavs[] = {manager->GetBufferUAV(output->m_dataHandles.m_bufferHandle)};
+        ID3D11ShaderResourceView* srvs[] = {manager->GetBufferSRV(input->m_dataHandles.m_bufferHandle)};
+        context->CSSetShader(shader,nullptr,0u);
+        context->CSSetConstantBuffers(0u,2u,cbs);
+        context->CSSetUnorderedAccessViews(0u,1u,uavs,nullptr);
+        context->CSSetShaderResources(0u,1u,srvs);
+        context->Dispatch(x,y,1u);
+        ID3D11UnorderedAccessView* nullUAV[] = {nullptr};
+        ID3D11ShaderResourceView* nullSRV[] = {nullptr};
+        context->CSSetUnorderedAccessViews(0u,1u,nullUAV,nullptr);
+        context->CSSetShaderResources(0u,1u,nullSRV);
+        context->CSSetShader(nullptr,nullptr,0u);
+    };
+    uint32_t destination = 0u;
+    for (auto* gradient : gradients)
+    {
+        if (gradient->GetElementCount() == 0u) continue;
+        gradient->Unmap();
+        if (!SyncCBuffer(gradient)) throw std::runtime_error("Cannot bind gradient buffer.");
+        manager->SetCBufferOptionalParams(workspace.partials->m_dataHandles.m_cbufferHandle,&destination,1u);
+        const uint32_t groups = uint32_t((uint64_t(gradient->GetElementCount())+1023u)/1024u);
+        dispatch(reduceShader,workspace.partials.get(),gradient,std::min(groups,65535u),(groups+65534u)/65535u);
+        destination += groups;
+    }
+    const uint32_t params[] = {PackFloat(maximumNorm),partialCount};
+    manager->SetCBufferOptionalParams(workspace.scale->m_dataHandles.m_cbufferHandle,params,2u);
+    dispatch(scaleShader,workspace.scale.get(),workspace.partials.get(),1u,1u);
+    for (auto* gradient : gradients)
+        if (gradient->GetElementCount() != 0u) Scale(gradient,gradient,workspace.scale.get());
 }
 
 #endif

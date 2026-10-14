@@ -117,6 +117,7 @@ class MatrixMetal : public MatrixBase<T>
             m_dataHandles = *(handles*)_ptr;
             m_derivedAll = true;
         }
+        m_offset = _offset;
         if (_offset != 0)
         {
             m_derivedAll     = false;
