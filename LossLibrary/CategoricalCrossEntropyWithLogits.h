@@ -3,8 +3,14 @@
 #include <cassert>
 #include <cmath>
 #include <cstdint>
+#include <type_traits>
 #include <LossLibrary/Loss.h>
 #include <MatrixLibrary/MatrixBase.h>
+
+#ifdef __APPLE__
+#include <MatrixLibrary/GPU/Metal/MatrixMetal_Functions.h>
+#include <stdexcept>
+#endif
 
 #ifdef _WIN32
 #include <MatrixLibrary/GPU/DirectX11/MatrixDX11.h>
@@ -212,6 +218,97 @@ class CategoricalCrossEntropyWithLogits : public LossBase<T, MatT>
         }
     }
 };
+
+#ifdef __APPLE__
+template<class T>
+class CategoricalCrossEntropyWithLogits<T, MatrixMetal<T>> : public LossBase<T, MatrixMetal<T>>
+{
+    using Mat = MatrixMetal<T>;
+    using MatrixRef = typename MatrixManager<T, Mat>::MatrixRef;
+    static_assert(std::is_same_v<T, float>, "Metal cross-entropy requires float matrices.");
+
+public:
+    const char* GetName() const override { return "CategoricalCrossEntropyWithLogits"; }
+
+    T Loss(Mat* target, Mat* logits) override
+    {
+        if (!target || !logits || !logits->GetElementCount()) return T(0);
+        ValidateTargets(target, logits);
+        auto& manager = MatrixManager<T, Mat>::Instance();
+        const uint32_t rows = logits->GetDimsY() * logits->GetDimsZ();
+        if (!m_rowLoss || m_rowLoss->GetDimsY() != rows)
+            m_rowLoss = manager.AllocateMatrix({2u, rows, 1u}, "CrossEntropyRows");
+        if (!m_loss)
+            m_loss = manager.AllocateMatrix({1u, 1u, 1u}, "CrossEntropyLoss");
+        Encode("cce_logits_loss", m_rowLoss.get(), target, logits, rows);
+        Encode("cce_logits_reduce", m_loss.get(), m_rowLoss.get(), target, 1u);
+        const T result = m_loss->DataRead()[0];
+        m_loss->Unmap();
+        return result;
+    }
+
+    void Gradient(Mat* out, Mat* target, Mat* logits) override
+    {
+        if (!out || !target || !logits || !logits->GetElementCount()) return;
+        ValidateTargets(target, logits);
+        assert(out->GetDimsX() == logits->GetDimsX());
+        assert(out->GetDimsY() == logits->GetDimsY());
+        assert(out->GetDimsZ() == logits->GetDimsZ());
+        assert(out->m_dataHandles.m_bufferHandle != logits->m_dataHandles.m_bufferHandle);
+        assert(out->m_dataHandles.m_bufferHandle != target->m_dataHandles.m_bufferHandle);
+        if (!m_inverseCount)
+            m_inverseCount = MatrixManager<T, Mat>::Instance().AllocateMatrix({1u, 1u, 1u}, "CrossEntropyInverseCount");
+        if (target->GetDimsX() == 1u)
+            Encode("cce_logits_count", m_inverseCount.get(), target, logits, 1u);
+        Encode("cce_logits_grad", out, target, logits,
+               logits->GetDimsY() * logits->GetDimsZ(), m_inverseCount.get());
+    }
+
+private:
+    MatrixRef m_inverseCount;
+    MatrixRef m_rowLoss;
+    MatrixRef m_loss;
+
+    static void ValidateTargets(Mat* target, Mat* logits)
+    {
+        assert(target->GetDimsX() == 1u || target->GetDimsX() == logits->GetDimsX());
+        assert(target->GetDimsY() == logits->GetDimsY());
+        assert(target->GetDimsZ() == 1u || target->GetDimsZ() == logits->GetDimsZ());
+    }
+
+    // Snapshot parameters into the current command buffer. No CPU mappings or waits
+    // are needed for GPU-resident inputs; the scalar-returning Loss handles readback.
+    static void Encode(const char* name, Mat* out, Mat* target, Mat* logits,
+                       uint32_t groups, Mat* inverseCount = nullptr)
+    {
+        auto* manager = out->m_gInstance;
+        Mat* matrices[] = {out, target, logits, inverseCount};
+        for (auto* matrix : matrices)
+        {
+            if (!matrix) continue;
+            matrix->Unmap();
+            if (!MetalSyncCBuffer(matrix))
+                throw std::runtime_error("Cannot bind Metal cross-entropy parameters.");
+        }
+        Obj pipeline = manager->GetPipeline(name);
+        Obj encoder = manager->GetEncoder();
+        if (!pipeline || !encoder)
+            throw std::runtime_error("Metal cross-entropy pipeline is unavailable.");
+        Send<void>(encoder, "setComputePipelineState:", pipeline);
+        for (uint64_t i = 0; i < 4; ++i)
+        {
+            if (!matrices[i]) continue;
+            Obj buffer = manager->GetBuffer(matrices[i]->m_dataHandles.m_bufferHandle);
+            if (!buffer) throw std::runtime_error("Metal cross-entropy buffer is unavailable.");
+            Send<void>(encoder, "setBuffer:offset:atIndex:", buffer, 0ull, i);
+            MetalBindCBuffer(encoder, manager->GetCBuffer(matrices[i]->m_dataHandles.m_cbufferHandle), i + 4u);
+        }
+        const MTLSize grid = {groups, 1u, 1u}, group = {256u, 1u, 1u};
+        Send<void>(encoder, "dispatchThreadgroups:threadsPerThreadgroup:", grid, group);
+        manager->WorkSubmitted();
+    }
+};
+#endif
 
 #ifdef _WIN32
 template<class T>

@@ -19,16 +19,23 @@
     #include <MatrixLibrary/GPU/DirectX11/MatrixDX11.h>
 #endif
 
+#ifdef __APPLE__
+    #include <MatrixLibrary/GPU/Metal/MetalManager.h>
+    #include <MatrixLibrary/GPU/Metal/MatrixMetal.h>
+#endif
+
 #include <Loading/SaveLoader.h>
 
 #include "DiffusionHelpers.h"
 
 #define T float
 
-#ifdef _WIN32
-using MatType = MatrixDX11<T>;
+#if defined(_WIN32)
+    using MatType = MatrixDX11<T>;
+#elif defined(__APPLE__)
+    using MatType = MatrixMetal<T>;
 #else
-using MatType = MatrixCPU<T>;
+    using MatType = MatrixCPU<T>;
 #endif
 
 using MatrixRef = typename MatrixManager<T, MatType>::MatrixRef;

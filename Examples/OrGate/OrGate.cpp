@@ -14,15 +14,24 @@
 #include <OptimiserLibrary/AdamOptimiser.h>
 #include <LossLibrary/Losses.h>
 
+#ifdef __APPLE__
+    #include <MatrixLibrary/GPU/Metal/MetalManager.h>
+    #include <MatrixLibrary/GPU/Metal/MatrixMetal.h>
+#endif
+
+#ifdef _WIN32
+    #include <MatrixLibrary/GPU/DirectX11/DirectX11Manager.h>
+    #include <MatrixLibrary/GPU/DirectX11/MatrixDX11.h>
+#endif
 
 #define T float
-using MatType = MatrixCPU<T>;
+using MatType = MatrixMetal<T>;
 using MatrixRef = typename MatrixManager<T, MatType>::MatrixRef;
 
 int main()
 {
     ThreadPool pool;
-    MatrixManager<T, MatType>& inst = MatrixManager<T, MatrixCPU<T>>::Instance();
+    MatrixManager<T, MatType>& inst = MatrixManager<T, MatType>::Instance();
     const uint32_t batchSize = 1;
 
     // Build Training Data

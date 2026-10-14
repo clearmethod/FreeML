@@ -119,6 +119,7 @@ class DirectX11Manager
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/gelu.hlsl", "gelu");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/gelu_inplace.hlsl", "gelu_inplace");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/gelu_derivative.hlsl", "gelu_derivative");
+            LoadComputeShaderFromFile("GPU/DirectX11/Shaders/gelu_backwards.hlsl", "gelu_backwards");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/gelu_derivative_inplace.hlsl", "gelu_derivative_inplace");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/transpose.hlsl", "transpose");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/scale.hlsl", "scale");
@@ -129,12 +130,16 @@ class DirectX11Manager
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/fill_scalar.hlsl", "fill_scalar");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/softmax.hlsl", "softmax");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/softmax_backwards.hlsl", "softmax_backwards");
+            LoadComputeShaderFromFile("GPU/DirectX11/Shaders/attention_scores_backwards.hlsl", "attention_scores_backwards");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/cce_logits_loss.hlsl", "cce_logits_loss");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/cce_logits_grad.hlsl", "cce_logits_grad");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/mse_loss_reduce_rows.hlsl", "mse_loss_reduce_rows");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/reduce_sum_to_scalar.hlsl", "reduce_sum_to_scalar");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/adam_update.hlsl", "adam_update");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/layernorm.hlsl", "layernorm");
+            LoadComputeShaderFromFile("GPU/DirectX11/Shaders/layernorm_cached.hlsl", "layernorm_cached");
+            LoadComputeShaderFromFile("GPU/DirectX11/Shaders/layernorm_nobeta_cached.hlsl", "layernorm_nobeta_cached");
+            LoadComputeShaderFromFile("GPU/DirectX11/Shaders/layernorm_backwards_dx_cached.hlsl", "layernorm_backwards_dx_cached");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/layernorm_nobeta.hlsl", "layernorm_nobeta");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/layernorm_no_xhat.hlsl", "layernorm_no_xhat");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/layernorm_nobeta_no_xhat.hlsl", "layernorm_nobeta_no_xhat");
