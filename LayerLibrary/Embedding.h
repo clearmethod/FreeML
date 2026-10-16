@@ -4,6 +4,7 @@
 #include "../MatrixLibrary/MatrixBase.h"
 #include "../MatrixLibrary/MatrixBase_Functions.h"
 #include <MatrixLibrary/GPU/DirectX11/MatrixDX11_Functions.h>
+#include <MatrixLibrary/GPU/Metal/MatrixMetal_Functions.h>
 #include "../MatrixLibrary/MatrixManager.h"
 #include "../ToolsLibrary/Tools.h"
 

@@ -35,6 +35,7 @@ class LayerNorm : public Layer<T, Mat>
     using MatrixRef = typename MatrixManager<T, Mat>::MatrixRef;
 
     public:
+    float GetWeightDecayScale(Datablob<T, Mat>*, Mat*) override { return 0.0f; }
     std::vector<MatrixRef>* GetWeights(Datablob<T, Mat>* _blob)  override
     {
         Layer<T, Mat>::m_weightMatrices.clear();
@@ -98,6 +99,7 @@ class LayerNorm : public Layer<T, Mat>
         if (_blob->GetUInt("TrainingEnabled") > 0u)
         {
             this->EnsureMatrix(_blob, "XHat", input->GetDimsX(), input->GetDimsY(), input->GetDimsZ());
+            this->EnsureMatrix(_blob, "InvStd", 1u, input->GetDimsY(), input->GetDimsZ());
             this->EnsureMatrix(_blob, "ErrorOutput_0", input->GetDimsX(), input->GetDimsY(), input->GetDimsZ());
         }
     }
@@ -128,6 +130,9 @@ class LayerNorm : public Layer<T, Mat>
         {
             auto xHat = inst.AllocateMatrix(_input->GetDims(), "XHat");
             _blob->Set("XHat", xHat);
+
+            auto invStd = inst.AllocateMatrix({1u, _input->GetDimsY(), _input->GetDimsZ()}, "InvStd");
+            _blob->Set("InvStd", invStd);
 
             auto outputErr = inst.AllocateMatrix(_input->GetDims(), "ErrorOutput_0");
             _blob->Set("ErrorOutput_0", outputErr);
@@ -161,7 +166,9 @@ class LayerNorm : public Layer<T, Mat>
 
         // This is a standard math operation, so we just call the forward version of the function.
         const T eps = static_cast<T>(1e-5);
-        LayerNormOp<T>(output, input, gScale, bShift, xHat, eps);
+        const bool training = _blob->GetUInt("TrainingEnabled") > 0u;
+        auto invStdRef = training ? _blob->AcquireMatrix("InvStd") : MatrixRef{};
+        LayerNormOp<T>(output, input, gScale, bShift, training ? xHat : nullptr, eps, invStdRef.get());
     }
 
     void Backwards(Datablob<T, Mat>* _blob) override
@@ -190,7 +197,8 @@ class LayerNorm : public Layer<T, Mat>
                                   gScaleGrad,
                                   bShiftGrad,
                                   xHat,
-                                  eps);
+                                  eps,
+                                  _blob->GetUInt("TrainingEnabled") > 0u ? _blob->GetMatrix("InvStd") : nullptr);
     }
 
 };

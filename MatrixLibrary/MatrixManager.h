@@ -513,7 +513,8 @@ class MatrixManager
                 ++it;
             }
         }
-        m_SkeletonHandles.erase(_handle);
+        // Keep the borrowed-storage marker until TryDeleteNow deletes the
+        // matrix. Live references must never turn a view into an owner.
     }
 };
 

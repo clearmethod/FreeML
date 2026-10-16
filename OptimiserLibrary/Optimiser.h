@@ -25,4 +25,11 @@ public:
      * layerId  Optional identifier for grouping parameters.
      */
     virtual void Step(Mat* param, Mat* grad) = 0;
+
+    // Optimizers without decoupled weight decay retain their existing behavior.
+    virtual void Step(Mat* param, Mat* grad, float weightDecayScale)
+    {
+        (void)weightDecayScale;
+        Step(param, grad);
+    }
 };

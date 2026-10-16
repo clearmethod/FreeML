@@ -4,6 +4,9 @@
 #include "../MatrixLibrary/MatrixBase.h"
 #include "../MatrixLibrary/MatrixBase_Functions.h"
 #include <MatrixLibrary/GPU/DirectX11/MatrixDX11_Functions.h>
+#include <MatrixLibrary/GPU/Metal/MatrixMetal_Functions.h>
+#include <ActivationLibrary/Identity.h>
+#include <type_traits>
 
 #include "../ToolsLibrary/Tools.h"
 
@@ -59,7 +62,7 @@ class ActivationLayer : public Layer<T, Mat>
         return _blob->AcquireMatrix("Output_0");
     }
 
-    void Forward(Datablob<T, Mat>* _blob)
+    void Forward(Datablob<T, Mat>* _blob) override
     {
         typename MatrixManager<T, Mat>::MatrixRef inputRef = _blob->AcquireMatrix("Input_0");
         Mat* input = inputRef.get();
@@ -68,11 +71,16 @@ class ActivationLayer : public Layer<T, Mat>
         assert(input);
         assert(output);
 
-        ActFunc act;
-        act.activateMat(output, input);
+        if constexpr (std::is_same_v<ActFunc, Identity<T>>)
+            Copy(output, input);
+        else
+        {
+            ActFunc act;
+            act.activateMat(output, input);
+        }
     }
 
-    void Backwards(Datablob<T, Mat>* _blob)
+    void Backwards(Datablob<T, Mat>* _blob) override
     {
         typename MatrixManager<T, Mat>::MatrixRef errorRef = _blob->AcquireMatrix("ErrorInput_0");
         Mat* error = errorRef.get();
@@ -85,8 +93,15 @@ class ActivationLayer : public Layer<T, Mat>
         assert(output);
         assert(errorOut);
 
-        ActFunc act;
-		act.derivativeMat(errorOut, output);
-        PerElementMul(errorOut, error, errorOut);
+        Mat* input = _blob->GetMatrix("Input_0");
+        assert(input);
+        if constexpr (std::is_same_v<ActFunc, Identity<T>>)
+            Copy(errorOut, error);
+        else
+        {
+            ActFunc act;
+            act.derivativeMat(errorOut, input, output);
+            PerElementMul(errorOut, error, errorOut);
+        }
     }
 };

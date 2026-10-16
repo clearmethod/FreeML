@@ -9,6 +9,9 @@
 #ifdef _WIN32
 #include <MatrixLibrary/GPU/DirectX11/MatrixDX11_Functions.h>
 #endif
+#ifdef __APPLE__
+#include <MatrixLibrary/GPU/Metal/MatrixMetal_Functions.h>
+#endif
 
 // AdamW optimiser implementation.
 // Keeps running estimates of first and second moments for each parameter
@@ -50,6 +53,17 @@ public:
     T GetBeta2() const { return m_beta2; }
     T GetEpsilon() const { return m_epsilon; }
     T GetWeightDecay() const { return m_weightDecay; }
+
+    // NanoLLM updates every parameter together, so this is its completed update
+    // count. The per-parameter steps are already preserved in checkpoints.
+    uint64_t GetMaximumStepCount() const
+    {
+        uint64_t maximum = 0u;
+        for (const auto& entry : m_timestep)
+            if (entry.second > maximum)
+                maximum = entry.second;
+        return maximum;
+    }
 
     void SetLearningRate(T _in) { m_learningRate = _in; }
     void SetBeta1(T _in)        { m_beta1        = _in; }
@@ -130,6 +144,11 @@ public:
     // grad     Gradient of the objective with respect to @p param.
     void Step(Mat* param, Mat* grad) override
     {
+        Step(param, grad, 1.0f);
+    }
+
+    void Step(Mat* param, Mat* grad, float weightDecayScale) override
+    {
         // Use the address of the parameter matrix as a key into the state
         // maps that hold first/second moment estimates and timestep counts.
         Mat* key = param;
@@ -158,7 +177,7 @@ public:
         T beta1       = m_beta1;
         T beta2       = m_beta2;
         T eps         = m_epsilon;
-        T weightDecay = m_weightDecay;
+        T weightDecay = m_weightDecay * static_cast<T>(weightDecayScale);
 
         // Pre-compute powers used for bias correction
         T beta1_pow_t = std::pow(beta1, t);
@@ -171,6 +190,23 @@ public:
                         static_cast<MatrixDX11<T>*>(grad),
                         static_cast<MatrixDX11<T>*>(mt.get()),
                         static_cast<MatrixDX11<T>*>(vt.get()),
+                        lr,
+                        beta1,
+                        beta2,
+                        beta1_pow_t,
+                        beta2_pow_t,
+                        eps,
+                        weightDecay);
+        }
+        else
+#endif
+#ifdef __APPLE__
+        if constexpr (std::is_same_v<Mat, MatrixMetal<T>>)
+        {
+            AdamWUpdate(static_cast<MatrixMetal<T>*>(param),
+                        static_cast<MatrixMetal<T>*>(grad),
+                        static_cast<MatrixMetal<T>*>(mt.get()),
+                        static_cast<MatrixMetal<T>*>(vt.get()),
                         lr,
                         beta1,
                         beta2,

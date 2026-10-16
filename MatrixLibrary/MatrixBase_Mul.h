@@ -626,7 +626,10 @@ void MatMul_Strided(MatrixBase<T>* _out,
                     uint32_t outColStride,
                     uint32_t blockSize = 32,
                     uint32_t numThreads = 12,
-                    ThreadPool* pool = nullptr)
+                    ThreadPool* pool = nullptr,
+                    uint32_t L_batchStride = UINT32_MAX,
+                    uint32_t R_batchStride = UINT32_MAX,
+                    uint32_t outBatchStride = UINT32_MAX)
 {
     if (!pool)
     {
@@ -675,9 +678,9 @@ void MatMul_Strided(MatrixBase<T>* _out,
         return;
     }
 
-    const uint32_t L_planeStride = L_rowStride * L_rows;
-    const uint32_t R_planeStride = R_rowStride * R_rows;
-    const uint32_t outPlaneStride = outRowStride * outRows;
+    const uint32_t L_planeStride = L_batchStride == UINT32_MAX ? L_rowStride * L_rows : L_batchStride;
+    const uint32_t R_planeStride = R_batchStride == UINT32_MAX ? R_rowStride * R_rows : R_batchStride;
+    const uint32_t outPlaneStride = outBatchStride == UINT32_MAX ? outRowStride * outRows : outBatchStride;
 
     auto batchWorker = [&](uint32_t z)
     {
@@ -721,3 +724,20 @@ void MatMul_Strided(MatrixBase<T>* _out,
     }
 }
 
+
+// Strides are in elements. A zero batch stride broadcasts an input matrix.
+struct MatrixStrides
+{
+    uint32_t row;
+    uint32_t column;
+    uint32_t batch;
+};
+
+template<TransposeMode Mode = TransposeMode::None, class Mat>
+void MatMul_Batched(Mat* out, Mat* left, Mat* right,
+                    MatrixStrides output, MatrixStrides lhs, MatrixStrides rhs)
+{
+    MatMul_Strided<Mode>(out, left, right, lhs.row, lhs.column, rhs.row, rhs.column,
+                         output.row, output.column, 32u, 12u, nullptr,
+                         lhs.batch, rhs.batch, output.batch);
+}

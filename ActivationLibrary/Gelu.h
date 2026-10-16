@@ -29,17 +29,22 @@ public:
         return static_cast<T>(0.5) * (static_cast<T>(1) + erfTerm) + (x * expTerm) / sqrt2pi;
     }
 
+    void activateMat(Mat* _matOut, Mat* _matIn) override
+    {
+        GeluMat(_matOut, _matIn);
+    }
+
     virtual void activateMat(Mat* _matOut,
                              Mat* _matIn,
-                             ThreadPool* _pool)
+                             ThreadPool* _pool) override
     {
         (void)_pool;
-        GeluMat(_matOut, _matIn);
+        activateMat(_matOut, _matIn);
     }
 
     virtual void derivativeMat(Mat* _matOut,
                                Mat* _matIn,
-                               Mat* _notused = nullptr) 
+                               Mat* _notused = nullptr) override
     {
         (void)_notused;
         GeluDerivtiveMat(_matOut, _matIn);

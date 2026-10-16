@@ -1,6 +1,7 @@
 #pragma once
 
 #include <random>
+#include <cstdint>
 #include <atomic>
 #include <cstddef>
 #include <vector>
@@ -16,6 +17,20 @@ namespace RandomUtils
     {
         static std::mt19937 generator(std::random_device{}());
         return generator;
+    }
+
+    // A fresh seed per dispatch without generating or uploading a random array.
+    inline uint32_t NextSeed()
+    {
+        static std::atomic<uint32_t> seed{std::random_device{}()};
+        return seed.fetch_add(0x9e3779b9u, std::memory_order_relaxed);
+    }
+
+    inline uint32_t pcg_hash(uint32_t value)
+    {
+        const uint32_t state = value * 747796405u + 2891336453u;
+        const uint32_t word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+        return (word >> 22u) ^ word;
     }
 
     // Random float from normal distribution

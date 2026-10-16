@@ -1,5 +1,6 @@
 
 #include <cstdint>
+#include <deque>
 #include <cassert>
 #include <array>
 #include <cmath>
@@ -21,24 +22,33 @@
 #include <LossLibrary/Losses.h>
 
 #include <ToolsLibrary/Tools.h>
+#include "LearningRateSchedule.h"
 
 #include <MatrixLibrary/MatrixBase_Functions.h>
 #include <MatrixLibrary/CPU/MatrixCPU.h>
 
 #ifdef _WIN32
-#include <MatrixLibrary/GPU/DirectX11/DirectX11Manager.h>
-#include <MatrixLibrary/GPU/DirectX11/MatrixDX11.h>
+    #include <MatrixLibrary/GPU/DirectX11/DirectX11Manager.h>
+    #include <MatrixLibrary/GPU/DirectX11/MatrixDX11.h>
+#endif
+
+#ifdef __APPLE__
+    #include <MatrixLibrary/GPU/Metal/MetalManager.h>
+    #include <MatrixLibrary/GPU/Metal/MatrixMetal.h>
 #endif
 
 #include <Loading/SaveLoader.h>
 
 #define T float
 // Switch to CPU if not on Windows.
-#ifdef _WIN32
-using MatType = MatrixDX11<T>;//MatrixCPU<PRECISION>;
+#if defined(_WIN32)
+    using MatType = MatrixDX11<T>;
+#elif defined(__APPLE__)
+    using MatType = MatrixMetal<T>;
 #else
-using MatType = MatrixCPU<PRECISION>;//
+    using MatType = MatrixCPU<T>;
 #endif
+
 
 using LayerT = Layer<T, MatType>;
 using BlobT = Datablob<T, MatType>;
@@ -51,17 +61,24 @@ struct NanoLLMConfig
     uint32_t n_layer         = 6u;   // number of transformer blocks
     uint32_t n_head          = 6u;   // number of attention heads per block
     uint32_t n_embed         = 384u; // embedding/hidden dimension
-    uint32_t iter_count      = 50000u;
-    float    dropout         = 0.0f;
-    float    learning_rate   = 0.0001f;
+    uint32_t iter_count      = 500000u; // optimizer updates per training cycle
+    uint32_t gradient_accumulation_steps = 64u; // sampled sequences per optimizer update
+    float    dropout         = 0.2f;
+    float    learning_rate   = 0.001f; // peak rate after warmup
+    float    minimum_learning_rate = 0.0001f;
+    uint64_t warmup_updates  = 100u;
+    uint64_t decay_updates   = 5000u; // hold the minimum rate after this update
+    float    gradient_clip_norm = 1.0f; // zero disables global norm clipping
+    bool     selective_weight_decay = true; // exclude Dense biases and LayerNorm parameters
     bool     use_bias        = false;
-    uint32_t decode_Interval = 50u;
+    uint32_t decode_Interval = 1u;
     uint32_t save_interval   = 300u;
+    bool     sync_layer_timings = false; // wait for GPU completion after each timed layer
 
     #ifdef _DEBUG
     std::string model_name = "NanoLLM_DEBUG";
     #else
-    std::string model_name = "NanoLLM";
+    std::string model_name = "NanoLLM_REL";
     #endif
 };
 
@@ -81,6 +98,23 @@ static bool ValidateConfig(const NanoLLMConfig& cfg)
     if (cfg.n_head != 0u && (cfg.n_embed % cfg.n_head) != 0u)
     {
         LOG_ERROR() << "Invalid config: n_embed must be divisible by n_head.";
+        ok = false;
+    }
+    if (cfg.gradient_accumulation_steps == 0u)
+    {
+        LOG_ERROR() << "Invalid config: gradient_accumulation_steps must be positive.";
+        ok = false;
+    }
+    if (!std::isfinite(cfg.gradient_clip_norm) || cfg.gradient_clip_norm < 0.0f)
+    {
+        LOG_ERROR() << "Invalid config: gradient_clip_norm must be finite and nonnegative.";
+        ok = false;
+    }
+    if (!NanoLLMLearningRateSchedule{cfg.learning_rate, cfg.minimum_learning_rate,
+                                    cfg.warmup_updates, cfg.decay_updates}.IsValid())
+    {
+        LOG_ERROR() << "Invalid learning-rate schedule: require finite rates, "
+                    << "0 < minimum <= peak, and decay_updates > warmup_updates.";
         ok = false;
     }
     if (cfg.batch_size != 1u)
@@ -349,7 +383,7 @@ static std::unique_ptr<Model<T, MatType>> BuildOrLoadModel(const NanoLLMConfig& 
         model->SetFinalOutputLayer(finalDense);
 
         const float weightDecay = 0.01f;
-        auto* adamopt = new AdamWOptimiser<T, MatType>(cfg.learning_rate, 0.9f, 0.999f, 1e-8f, weightDecay);
+        auto* adamopt = new AdamWOptimiser<T, MatType>(cfg.learning_rate, 0.9f, 0.99f, 1e-8f, weightDecay);
         model->SetOptimiser(adamopt);
         model->SetLoss(new CategoricalCrossEntropyWithLogits<T, MatType>());
 
@@ -360,7 +394,6 @@ static std::unique_ptr<Model<T, MatType>> BuildOrLoadModel(const NanoLLMConfig& 
     else
     {
         model->Init();
-        static_cast<AdamWOptimiser<T, MatType>*>(model->GetOptimiser())->SetLearningRate(0.00003f);
         PressAnyKeyToContinue();
 
         // If you want to change the model after it is loaded.
@@ -372,6 +405,10 @@ static std::unique_ptr<Model<T, MatType>> BuildOrLoadModel(const NanoLLMConfig& 
         // 
     }
 
+    model->SetGradientAccumulationSteps(cfg.gradient_accumulation_steps);
+    model->SetGradientClipNorm(cfg.gradient_clip_norm);
+    model->SetSelectiveWeightDecay(cfg.selective_weight_decay);
+    model->SetTimingSynchronization(cfg.sync_layer_timings);
     return model;
 }
 
@@ -435,18 +472,47 @@ static void TrainLoop(Model<T, MatType>*            model,
     std::mt19937 rng(std::random_device{}());
     std::uniform_int_distribution<uint32_t> startDist(0u, maxStart);
 
+    model->SetTimingSynchronization(false);
+
+    auto* adam = dynamic_cast<AdamWOptimiser<T, MatType>*>(model->GetOptimiser());
+    if (!adam)
+    {
+        LOG_ERROR() << "NanoLLM learning-rate scheduling requires AdamW.";
+        return;
+    }
+    const NanoLLMLearningRateSchedule schedule{cfg.learning_rate, cfg.minimum_learning_rate,
+                                             cfg.warmup_updates, cfg.decay_updates};
+    // Existing AdamW checkpoints retain this count, including older checkpoints.
+    uint64_t update = adam->GetMaximumStepCount();
+    LOG_INFO() << "Resuming learning-rate schedule after " << update << " optimizer updates.";
+
+    model->SetRollingLossWindow(100u);
+
     // Loop forever training.
     while(true)
     {
         for(uint32_t i = 0; i < cfg.iter_count; i++)
         {
-            const uint32_t start = (maxStart == 0u ? 0u : startDist(rng));
-            CopyRange(inputBuffer, corpus, 0u, start, cfg.block_size);
-            CopyRange(targetBuffer, corpus, 0u, start + 1u, cfg.block_size);
-            model->Run(inputBuffer, targetBuffer);
+            const float learningRate = schedule.AtUpdate(update);
+            adam->SetLearningRate(learningRate);
+            model->BeginLossBatch();
+            for (uint32_t pass = 0; pass < cfg.gradient_accumulation_steps; ++pass)
+            {
+                const uint32_t start = (maxStart == 0u ? 0u : startDist(rng));
+                CopyRange(inputBuffer, corpus, 0u, start, cfg.block_size);
+                CopyRange(targetBuffer, corpus, 0u, start + 1u, cfg.block_size);
+                model->Run(inputBuffer, targetBuffer);
+            }
+            ++update;
 
-            LOG_INFO() << "Iteration: " << i << " Loss: " << model->GetLastLoss();
-            // Save occaisonally
+            // Read once, after every backward pass and the optimizer update
+            // have been recorded. Every sequence has the same token count.
+            const double batchLoss = model->EndLossBatch();
+
+            LOG_INFO() << "Iteration: " << i << " Optimizer updates: " << update
+                       << " LR: " << learningRate << " Loss: " << batchLoss
+                       << " Rolling loss: " << model->GetRollingLoss();
+            // Save after a complete optimizer update.
             if (i % cfg.save_interval == 0 && i > 0u)
             {
                 model->Save();

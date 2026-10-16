@@ -4,11 +4,13 @@
 #include "../MatrixLibrary/MatrixBase.h"
 #include "../MatrixLibrary/MatrixBase_Functions.h"
 #include <MatrixLibrary/GPU/DirectX11/MatrixDX11_Functions.h>
+#include <MatrixLibrary/GPU/Metal/MatrixMetal_Functions.h>
 #include <MatrixLibrary/MatrixManager.h>
 
 #include "../ToolsLibrary/Tools.h"
 
 #include <ActivationLibrary/Identity.h>
+#include <ActivationLibrary/Gelu.h>
 
 #include <cmath>
 #include <functional>
@@ -109,6 +111,10 @@ class Dense : public Layer<T, Mat>
     }
 
     static constexpr bool kIsIdentity = std::is_same_v<ActFunc, Identity<T>>;
+    float GetWeightDecayScale(Datablob<T, Mat>* blob, Mat* parameter) override
+    {
+        return parameter == blob->GetMatrix("Dense_Bias") ? 0.0f : 1.0f;
+    }
     std::vector<MatrixRef>* GetWeights(Datablob<T, Mat>* _blob) override
     {
         Layer<T, Mat>::m_weightMatrices.clear();
@@ -170,7 +176,7 @@ class Dense : public Layer<T, Mat>
         return _blob->AcquireMatrix("Output_0");
     }
 
-    virtual std::string GetMetaData()
+    virtual std::string GetMetaData() override
     {
         ActFunc a;
         return a.Name();
@@ -248,6 +254,10 @@ class Dense : public Layer<T, Mat>
         if constexpr (kIsIdentity)
         {
             Copy(delta, error);
+        }
+        else if constexpr (std::is_same_v<ActFunc, Gelu<T, Mat>>)
+        {
+            GeluBackwards(delta, outputPreActivation, error);
         }
         else
         {

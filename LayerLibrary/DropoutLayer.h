@@ -6,6 +6,9 @@
 #include <MatrixLibrary/MatrixBase_Functions.h>
 #include <MatrixLibrary/GPU/DirectX11/MatrixDX11_Functions.h>
 #include <MatrixLibrary/CPU/MatrixCPU.h>
+#ifdef __APPLE__
+#include <MatrixLibrary/GPU/Metal/MatrixMetal_Functions.h>
+#endif
 
 #include <cmath>
 #include <functional>
@@ -99,27 +102,7 @@ class DropoutLayer : public Layer<T, Mat>
         assert(_mask);
         assert(_zero);
         assert(_one);
-        const uint32_t elemCount = _mask->GetElementCount();
-        if (elemCount == 0) return;
-
-        if (_prob <= 0.0f)
-        {
-            Fill(_mask, _one);
-            return;
-        }
-
-        if (_prob >= 1.0f)
-        {
-            Fill(_mask, _zero);
-            return;
-        }
-
-        T* outPtr = _mask->DataWrite();
-        for (uint32_t i = 0; i < elemCount; ++i)
-        {
-            const float r = RandomUtils::random_uniform_buffered();
-            outPtr[i] = (r < _prob) ? T(0) : T(1);
-        }
+        DropoutMask(_mask, _prob);
     }
 
     void Forward(Datablob<T, Mat>* _blob) override
@@ -130,6 +113,11 @@ class DropoutLayer : public Layer<T, Mat>
         Mat* output = outputRef.get();
 
         uint32_t isTraining = _blob->GetUInt("TrainingEnabled");
+        if (!isTraining || _blob->GetFloat("Probability") == 0.0f)
+        {
+            Copy(output, input);
+            return;
+        }
         if(isTraining)
         {
             typename MatrixManager<T, Mat>::MatrixRef maskRef = _blob->AcquireMatrix("Mask");
@@ -155,6 +143,11 @@ class DropoutLayer : public Layer<T, Mat>
         Mat* errorIn = errorInRef.get();
         typename MatrixManager<T, Mat>::MatrixRef errorOutRef = _blob->AcquireMatrix("ErrorOutput_0");
         Mat* errorOut = errorOutRef.get();
+        if (_blob->GetUInt("TrainingEnabled") == 0u || _blob->GetFloat("Probability") == 0.0f)
+        {
+            Copy(errorOut, errorIn);
+            return;
+        }
         typename MatrixManager<T, Mat>::MatrixRef maskRef = _blob->AcquireMatrix("Mask");
         Mat* mask = maskRef.get();
         typename MatrixManager<T, Mat>::MatrixRef scaleRef = _blob->AcquireMatrix("ScalarScale");
