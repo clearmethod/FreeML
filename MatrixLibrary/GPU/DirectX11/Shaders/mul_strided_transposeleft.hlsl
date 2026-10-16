@@ -5,9 +5,9 @@ cbuffer MatOut_Params : register(b0)
     uint out_dimz;
     uint out_offset;
     uint out_uniqueId;
-    uint out_pad0;
-    uint out_pad1;
-    uint out_pad2;
+    uint out_channels;
+    uint out_batch;
+    uint out_reserved;
     uint4 out_optionalParams[4];
 };
 
@@ -18,9 +18,9 @@ cbuffer MatLeft_Params : register(b1)
     uint left_dimz;
     uint left_offset;
     uint left_uniqueId;
-    uint left_pad0;
-    uint left_pad1;
-    uint left_pad2;
+    uint left_channels;
+    uint left_batch;
+    uint left_reserved;
     uint4 left_optionalParams[4];
 };
 
@@ -31,9 +31,9 @@ cbuffer MatRight_Params : register(b2)
     uint right_dimz;
     uint right_offset;
     uint right_uniqueId;
-    uint right_pad0;
-    uint right_pad1;
-    uint right_pad2;
+    uint right_channels;
+    uint right_batch;
+    uint right_reserved;
     uint4 right_optionalParams[4];
 };
 
@@ -72,9 +72,9 @@ void CSMain(uint3 dispatchThreadId : SV_DispatchThreadID)
     uint left_planeStride = left_optionalParams[0].z;
     uint right_planeStride = right_optionalParams[0].z;
 
-    uint out_base = out_offset + out_z * out_planeStride;
-    uint left_base = left_offset + out_z * left_planeStride;
-    uint right_base = right_offset + out_z * right_planeStride;
+    uint out_base = out_offset + (out_batch == 1u ? 0u : out_z / out_channels) * out_optionalParams[0].w + (out_channels == 1u ? 0u : out_z % out_channels) * out_planeStride;
+    uint left_base = left_offset + (left_batch == 1u ? 0u : out_z / out_channels) * left_optionalParams[0].w + (left_channels == 1u ? 0u : out_z % out_channels) * left_planeStride;
+    uint right_base = right_offset + (right_batch == 1u ? 0u : out_z / out_channels) * right_optionalParams[0].w + (right_channels == 1u ? 0u : out_z % out_channels) * right_planeStride;
 
     float sum = 0.0f;
     for (uint k = 0; k < left_dimy; ++k)

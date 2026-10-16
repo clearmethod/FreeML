@@ -48,23 +48,23 @@ class FlattenCopyLayer : public Layer<T, Mat>
             return;
         }
 
-        const uint32_t dimsX = input->GetDimsX();
-        const uint32_t dimsY = input->GetDimsY() * input->GetDimsZ();
+        const uint32_t dimsX = input->GetWidth() * input->GetHeight() * input->GetChannelCount();
+        const auto shape=MatrixShape::Sequence(input->GetBatchCount(),dimsX,1u);
 
         MatrixManager<T, Mat>& inst = MatrixManager<T, Mat>::Instance();
         typename MatrixManager<T, Mat>::MatrixRef outRef = _blob->AcquireMatrix("Output_0");
         Mat* output = outRef.get();
         const bool outputMismatch = !output
-                                    || output->GetDimsX() != dimsX
-                                    || output->GetDimsY() != dimsY
-                                    || output->GetDimsZ() != 1u;
+                                    || output->GetWidth() != dimsX
+                                    || output->GetHeight() != 1u
+                                    || output->GetShape() != shape;
         if (outputMismatch)
         {
             if (output)
             {
                 inst.RemoveMatrix(output);
             }
-            auto outputRefNew = inst.AllocateMatrix({dimsX, dimsY}, "Flatten_Output");
+            auto outputRefNew = inst.AllocateMatrix(shape, "Flatten_Output");
             _blob->Set("Output_0", outputRefNew);
         }
 
@@ -73,16 +73,16 @@ class FlattenCopyLayer : public Layer<T, Mat>
             typename MatrixManager<T, Mat>::MatrixRef errRef = _blob->AcquireMatrix("ErrorOutput_0");
             Mat* errorOut = errRef.get();
             const bool errMismatch = !errorOut
-                                     || errorOut->GetDimsX() != input->GetDimsX()
-                                     || errorOut->GetDimsY() != input->GetDimsY()
-                                     || errorOut->GetDimsZ() != input->GetDimsZ();
+                                     || errorOut->GetWidth() != input->GetWidth()
+                                     || errorOut->GetHeight() != input->GetHeight()
+                                     || errorOut->GetShape() != input->GetShape();
             if (errMismatch)
             {
                 if (errorOut)
                 {
                     inst.RemoveMatrix(errorOut);
                 }
-                auto errorRefNew = inst.AllocateMatrix({input->GetDimsX(), input->GetDimsY(), input->GetDimsZ()},
+                auto errorRefNew = inst.AllocateMatrix(input->GetShape(),
                     "Flatten_ErrorOut");
                 _blob->Set("ErrorOutput_0", errorRefNew);
             }

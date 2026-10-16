@@ -51,28 +51,24 @@ Datablob<T, Mat>* InitCausalSelfAttentionLayerBlob(
     Datablob<T, Mat>* csa_proj = InitDenseBlob<T, Mat>(_n_embed, _n_embed, _block_size, _initForTraining, true, _useBias, true);
     blob->Set("CSA_ProjLayer", csa_proj);
 
-    // Init attention drop out per head (needed to preserve masks for backward pass)
-    for (uint32_t head = 0; head < _n_head; ++head)
-    {
-        Datablob<T, Mat>* csa_Attention_Dropout = InitDropoutBlob<T, Mat>(_dropout, _initForTraining);
-        blob->Set("CSA_AttentionDropout_" + std::to_string(head), csa_Attention_Dropout);
-    }
+    // One full batch/head mask is retained for backward.
+    blob->Set("CSA_AttentionDropout", InitDropoutBlob<T,Mat>(_dropout,_initForTraining));
 
     // Init resid drop out
     Datablob<T, Mat>* csa_Residual_Dropout = InitDropoutBlob<T, Mat>(_dropout, _initForTraining);
     blob->Set("CSA_ResidualDropout", csa_Residual_Dropout);
 
     // Init resid drop out
-    auto mask = inst.AllocateMatrix({_block_size, _block_size}, "Mask");
+    auto mask = inst.AllocateMatrix(MatrixShape::Matrix(_block_size,_block_size), "Mask");
     TriangleMatrix<T>(mask.get(), TriangleDirection::Lower, T(0), -std::numeric_limits<T>::infinity());
     blob->Set("TriangleMatrix", mask);
-    auto maskFinite = inst.AllocateMatrix({_block_size, _block_size}, "MaskFinite");
+    auto maskFinite = inst.AllocateMatrix(MatrixShape::Matrix(_block_size,_block_size), "MaskFinite");
     TriangleMatrix<T>(maskFinite.get(), TriangleDirection::Lower, T(1), T(0));
     blob->Set("TriangleFiniteMask", maskFinite);
 
     const uint32_t headDim = _n_head ? (_n_embed / _n_head) : 0u;
     const T scale = headDim ? (T(1) / std::sqrt(static_cast<T>(headDim))) : T(0);
-    auto scalarScale = inst.AllocateMatrix({1u, 1u, 1u}, "ScalarScale");
+    auto scalarScale = inst.AllocateMatrix(MatrixShape::Matrix(1u,1u), "ScalarScale");
     scalarScale->SetValue(0u, 0u, scale);
     blob->Set("ScalarScale", scalarScale);
     blob->Set("ScalarScaleHeadDim", headDim);
@@ -172,7 +168,7 @@ class CausalSelfAttentionLayer : public Layer<T, Mat>
             if (attentionBlob)
             {
                 if (Mat* out = attentionBlob->GetMatrix("Output_0"))
-                    needResize = out->GetDimsX() != outX || out->GetDimsY() != _dTB;
+                    needResize = !attentionBlob->GetMatrix("Dense_Weights") || attentionBlob->GetMatrix("Dense_Weights")->GetShape()!=MatrixShape::Matrix(outX,inX);
                 else
                     needResize = true;
             }
@@ -186,190 +182,41 @@ class CausalSelfAttentionLayer : public Layer<T, Mat>
         }
     }
 
-    void EnsureOutputsAllocated(Datablob<T, Mat>* _blob) override
+    void EnsureOutputsAllocated(Datablob<T,Mat>* blob) override
     {
-        typename MatrixManager<T, Mat>::MatrixRef inputRef = _blob->AcquireMatrix("Input_0");
-        Mat* input = inputRef.get();
-        if (!input)
-        {
-            return;
+        Mat* input=blob->GetMatrix("Input_0");if(!input) return;
+        const auto dims=GetShape(blob,input);
+        const bool training=blob->GetUInt("TrainingEnabled")!=0u;
+        this->EnsureMatrix(blob,"Output_0",input->GetShape());
+        if(training) this->EnsureMatrix(blob,"ErrorOutput_0",input->GetShape());
+        const auto sequence=input->GetShape();
+        const auto scores=MatrixShape::Image(dims.B_batch,dims.nHead,dims.T_block_size,dims.T_block_size);
+        const auto heads=MatrixShape::Image(dims.B_batch,dims.nHead,dims.headDim,dims.T_block_size);
+        for(const char* key : {"Scratch_Q","Scratch_K","Scratch_V","Scratch_Y"})
+            this->EnsureMatrix(blob,key,sequence);
+        for(const char* key : {"AttentionProbsAll","AttentionDroppedAll","Scratch_dScores"})
+            this->EnsureMatrix(blob,key,scores);
+        if(training) {
+            this->EnsureMatrix(blob,"Scratch_dAtt",scores);
+            for(const char* key : {"Scratch_dQh","Scratch_dKh","Scratch_dVh"}) this->EnsureMatrix(blob,key,heads);
+            this->EnsureMatrix(blob,"Scratch_QKVGrad",MatrixShape::Sequence(dims.B_batch,3u*dims.C_EmbedDims,dims.T_block_size));
         }
-
-        MatrixManager<T, Mat>& inst = MatrixManager<T, Mat>::Instance();
-        const bool initForTraining = _blob->GetUInt("TrainingEnabled") > 0u;
-        const bool useBias = _blob->GetUInt("UseBias") > 0u;
-        const AttentionDims dims = GetDims(_blob, input);
-        const uint32_t attRows = dims.T_block_size;
-
-        // Output / error buffers.
-        {
-            typename MatrixManager<T, Mat>::MatrixRef outputRef = _blob->AcquireMatrix("Output_0");
-            Mat* output = outputRef.get();
-            const bool outputMismatch = !output
-                || output->GetDimsX() != input->GetDimsX()
-                || output->GetDimsY() != input->GetDimsY()
-                || output->GetDimsZ() != input->GetDimsZ();
-            if (outputMismatch)
-            {
-                if (output)
-                {
-                    inst.RemoveMatrix(output);
-                }
-                auto outputRefNew = inst.AllocateMatrix({input->GetDimsX(), input->GetDimsY(), input->GetDimsZ()}, "Output_0");
-                _blob->Set("Output_0", outputRefNew);
-            }
+        const auto maskShape=MatrixShape::Matrix(dims.T_block_size,dims.T_block_size);
+        Mat* mask=blob->GetMatrix("TriangleMatrix");
+        if(!mask || mask->GetShape()!=maskShape) {
+            this->EnsureMatrix(blob,"TriangleMatrix",maskShape);
+            TriangleMatrix(blob->GetMatrix("TriangleMatrix"),TriangleDirection::Lower,T(0),-std::numeric_limits<T>::infinity());
         }
-
-        if (initForTraining)
-        {
-            typename MatrixManager<T, Mat>::MatrixRef outputErrRef = _blob->AcquireMatrix("ErrorOutput_0");
-            Mat* outputErr = outputErrRef.get();
-            const bool errMismatch = !outputErr
-                || outputErr->GetDimsX() != input->GetDimsX()
-                || outputErr->GetDimsY() != input->GetDimsY()
-                || outputErr->GetDimsZ() != input->GetDimsZ();
-            if (errMismatch)
-            {
-                if (outputErr)
-                {
-                    inst.RemoveMatrix(outputErr);
-                }
-                auto outputErrRefNew = inst.AllocateMatrix({input->GetDimsX(), input->GetDimsY(), input->GetDimsZ()}, "ErrorOutput_0");
-                _blob->Set("ErrorOutput_0", outputErrRefNew);
-            }
+        if(blob->GetUInt("ScalarScaleHeadDim")!=dims.headDim) {
+            blob->GetMatrix("ScalarScale")->SetValue(0u,0u,T(1)/std::sqrt(T(dims.headDim)));
+            blob->Set("ScalarScaleHeadDim",dims.headDim);
         }
-
-        // Attention projection (QKV) and output projection subblobs.
-        EnsureAttentionLayer(dims.C_EmbedDims, dims.TB, initForTraining, useBias, _blob);
-        Datablob<T, Mat>* attentionBlob = _blob->GetBlob("CSA_AttentionLayer");
-
-        Datablob<T, Mat>* projBlob = _blob->GetBlob("CSA_ProjLayer");
-        {
-            const uint32_t outX = dims.C_EmbedDims;
-            const uint32_t inX = dims.C_EmbedDims;
-            const bool needCreate = !projBlob;
-            bool needResize = false;
-            if (projBlob)
-            {
-                if (Mat* out = projBlob->GetMatrix("Output_0"))
-                {
-                    needResize = out->GetDimsX() != outX || out->GetDimsY() != dims.TB;
-                }
-                else
-                {
-                    needResize = true;
-                }
-            }
-            if (needCreate || needResize)
-            {
-                if (projBlob)
-                {
-                    ReleaseSubblob(projBlob);
-                }
-                projBlob = InitDenseBlob<T, Mat>(outX, inX, dims.TB, initForTraining, true, useBias, true);
-                _blob->Set("CSA_ProjLayer", projBlob);
-            }
-        }
-
-        // Heads share backing buffers; each dropout blob retains its own mask.
-        Mat* oldStorage = _blob->GetMatrix("AttentionProbsAll");
-        const bool rebindHeads = !oldStorage || oldStorage->GetDimsX() != attRows
-            || oldStorage->GetDimsY() != attRows
-            || oldStorage->GetDimsZ() != dims.B_batch * dims.nHead;
-        this->EnsureMatrix(_blob, "AttentionProbsAll", attRows, attRows, dims.B_batch * dims.nHead);
-        this->EnsureMatrix(_blob, "AttentionDroppedAll", attRows, attRows, dims.B_batch * dims.nHead);
-        Mat* probsStorage = _blob->GetMatrix("AttentionProbsAll");
-        Mat* droppedStorage = _blob->GetMatrix("AttentionDroppedAll");
-        for (uint32_t head = 0; head < dims.nHead; ++head)
-        {
-            BindHeadStorage(_blob, HeadAttKey(head), probsStorage, head, dims.B_batch, rebindHeads);
-            Datablob<T, Mat>* attentionDropoutBlob = GetAttentionDropoutBlob(_blob, head);
-            if (attentionDropoutBlob)
-            {
-                BindHeadStorage(attentionDropoutBlob, "Output_0", droppedStorage,
-                                head, dims.B_batch, rebindHeads);
-                if (attentionDropoutBlob->GetUInt("TrainingEnabled") > 0u)
-                {
-                    this->EnsureMatrix(attentionDropoutBlob, "Mask", attRows, attRows, dims.B_batch);
-                    this->EnsureMatrix(attentionDropoutBlob, "ErrorOutput_0", attRows, attRows, dims.B_batch);
-                }
-            }
-        }
-
-        // Residual dropout buffers.
-        Datablob<T, Mat>* residualDropoutBlob = _blob->GetBlob("CSA_ResidualDropout");
-        if (residualDropoutBlob)
-        {
-            this->EnsureMatrix(residualDropoutBlob, "Output_0", dims.C_EmbedDims, dims.T_block_size, dims.B_batch);
-            if (residualDropoutBlob->GetUInt("TrainingEnabled") > 0u)
-            {
-                this->EnsureMatrix(residualDropoutBlob, "Mask", dims.C_EmbedDims, dims.T_block_size, dims.B_batch);
-                this->EnsureMatrix(residualDropoutBlob, "ErrorOutput_0", dims.C_EmbedDims, dims.T_block_size, dims.B_batch);
-            }
-        }
-
-        // Scratch buffers.
-        this->EnsureMatrix(_blob, "Scratch_Q"       , dims.C_EmbedDims     , dims.T_block_size     , dims.B_batch);
-        this->EnsureMatrix(_blob, "Scratch_K"       , dims.C_EmbedDims     , dims.T_block_size     , dims.B_batch);
-        this->EnsureMatrix(_blob, "Scratch_V"       , dims.C_EmbedDims     , dims.T_block_size     , dims.B_batch);
-        this->EnsureMatrix(_blob, "Scratch_Y"       , dims.C_EmbedDims     , dims.T_block_size     , dims.B_batch);
-        this->EnsureMatrix(_blob, "Scratch_dY"      , dims.C_EmbedDims     , dims.T_block_size     , dims.B_batch);
-        this->EnsureMatrix(_blob, "Scratch_dAtt"    , attRows    , attRows    , dims.nHead);
-        this->EnsureMatrix(_blob, "Scratch_dScores" , attRows    , attRows    , dims.nHead);
-        this->EnsureMatrix(_blob, "Scratch_dQh"     , dims.headDim, dims.T_block_size    , dims.nHead);
-        this->EnsureMatrix(_blob, "Scratch_dKh"     , dims.headDim, dims.T_block_size    , dims.nHead);
-        this->EnsureMatrix(_blob, "Scratch_dVh"     , dims.headDim, dims.T_block_size    , dims.nHead);
-        this->EnsureMatrix(_blob, "Scratch_QKVGrad" , 3u * dims.C_EmbedDims, dims.T_block_size     , dims.B_batch);
-        for (uint32_t head = 0; head < dims.nHead; ++head)
-            BindHeadStorage(_blob, "Scratch_dAttHead_" + std::to_string(head),
-                            _blob->GetMatrix("Scratch_dAtt"), head, 1u, rebindHeads);
-
-
-        if (attentionBlob)
-        {
-            typename MatrixManager<T, Mat>::MatrixRef qkvGradRef = _blob->AcquireMatrix("Scratch_QKVGrad");
-            Mat* qkvGrad = qkvGradRef.get();
-            typename MatrixManager<T, Mat>::MatrixRef attErrInputRef = attentionBlob->AcquireMatrix("ErrorInput_0");
-            if (qkvGrad && !attErrInputRef.get())
-            {
-                attentionBlob->Set("ErrorInput_0", qkvGrad);
-            }
-
-            typename MatrixManager<T, Mat>::MatrixRef attInputRef = attentionBlob->AcquireMatrix("Input_0");
-            if (!attInputRef.get())
-            {
-                attentionBlob->Set("Input_0", input);
-            }
-        }
-
-        Mat* triangle = _blob->GetMatrix("TriangleMatrix");
-        if (!triangle || triangle->GetDimsX() != attRows || triangle->GetDimsY() != attRows)
-        {
-            this->EnsureMatrix(_blob, "TriangleMatrix", attRows, attRows);
-            typename MatrixManager<T, Mat>::MatrixRef triMaskRef = _blob->AcquireMatrix("TriangleMatrix");
-            Mat* triMask = triMaskRef.get();
-            if (triMask)
-            {
-                TriangleMatrix<T>(triMask, TriangleDirection::Lower, T(0), -std::numeric_limits<T>::infinity());
-            }
-        }
-        Mat* finiteTriangle = _blob->GetMatrix("TriangleFiniteMask");
-        if (!finiteTriangle || finiteTriangle->GetDimsX() != attRows || finiteTriangle->GetDimsY() != attRows)
-        {
-            this->EnsureMatrix(_blob, "TriangleFiniteMask", attRows, attRows);
-            typename MatrixManager<T, Mat>::MatrixRef triFiniteMaskRef = _blob->AcquireMatrix("TriangleFiniteMask");
-            Mat* triFiniteMask = triFiniteMaskRef.get();
-            if (triFiniteMask)
-            {
-                TriangleMatrix<T>(triFiniteMask, TriangleDirection::Lower, T(1), T(0));
-            }
-        }
-        if (_blob->GetUInt("ScalarScaleHeadDim") != dims.headDim)
-        {
-            auto scaleRef = _blob->AcquireMatrix("ScalarScale");
-            scaleRef->SetValue(0u, 0u, T(1) / std::sqrt(T(dims.headDim)));
-            _blob->Set("ScalarScaleHeadDim", dims.headDim);
-        }
+        // Dense resizes activations without recreating shared parameters.
+        EnsureAttentionLayer(dims.C_EmbedDims,dims.TB,training,blob->GetUInt("UseBias")!=0u,blob);
+        if(!blob->GetBlob("CSA_ProjLayer"))
+            blob->Set("CSA_ProjLayer",InitDenseBlob<T,Mat>(dims.C_EmbedDims,dims.C_EmbedDims,dims.TB,training,true,blob->GetUInt("UseBias")!=0u,true));
+        if(!blob->GetBlob("CSA_AttentionDropout"))
+            blob->Set("CSA_AttentionDropout",InitDropoutBlob<T,Mat>(blob->GetFloat("Init_Dropout"),training));
     }
 
     void DynamicInit(Datablob<T, Mat>* _blob, Mat* _input)
@@ -378,284 +225,74 @@ class CausalSelfAttentionLayer : public Layer<T, Mat>
         MatrixManager<T, Mat>& inst = MatrixManager<T, Mat>::Instance();
         assert(_input);
 
-        auto output = inst.AllocateMatrix({_input->GetDimsX(), _input->GetDimsY(), _input->GetDimsZ()}, "Output_0");
+        auto output = inst.AllocateMatrix(_input->GetShape(), "Output_0");
         _blob->Set("Output_0", output);
 
         if(_blob->GetUInt("TrainingEnabled") > 0u)
         {
-            auto outputErr = inst.AllocateMatrix({_input->GetDimsX(), _input->GetDimsY(), _input->GetDimsZ()}, "ErrorOutput_0");
+            auto outputErr = inst.AllocateMatrix(_input->GetShape(), "ErrorOutput_0");
             _blob->Set("ErrorOutput_0", outputErr);
         }
     }
 
-    void Forward(Datablob<T, Mat>* _blob) override
+    void Forward(Datablob<T,Mat>* blob) override
     {
-        // 1) Fetch input/output buffers and interpret dims as (C_embeding, T_block, B_batch) in row-major layout.
-        auto inputRef   = _blob->AcquireMatrix("Input_0");
-        Mat* input      = inputRef.get();
-        auto outputRef  = _blob->AcquireMatrix("Output_0");
-        Mat* output     = outputRef.get();
-
-        // Query, Key and Value are all size (C,C) where C is the model dimensions (sometimes called embed_dimesions).
-        auto qRef = _blob->AcquireMatrix("Scratch_Q");
-        auto kRef = _blob->AcquireMatrix("Scratch_K");
-        auto vRef = _blob->AcquireMatrix("Scratch_V");
-        Mat* Query  = qRef.get();
-        Mat* Key    = kRef.get();
-        Mat* Value  = vRef.get();
-
-        auto triMaskRef = _blob->AcquireMatrix("TriangleMatrix");
-        Mat* triMask    = triMaskRef.get();
-
-        auto scalarScaleRef = _blob->AcquireMatrix("ScalarScale");
-        Mat* scalarScale    = scalarScaleRef.get();
-        
-        auto attScoresAllRef = _blob->AcquireMatrix("Scratch_dScores");
-        Mat* attScoresAll    = attScoresAllRef.get();
-
-        auto yCombinedRef   = _blob->AcquireMatrix("Scratch_Y");
-        Mat* yCombined      = yCombinedRef.get();
-
-        Datablob<T, Mat>* m_attentionBlob = _blob->GetBlob("CSA_AttentionLayer");
-        auto attentionOutRef = m_attentionBlob->AcquireMatrix("Output_0");
-
-        Datablob<T, Mat>* residualDropoutBlob = _blob->GetBlob("CSA_ResidualDropout");
-        auto residOutRef = residualDropoutBlob->AcquireMatrix("Output_0");
-        Mat* residOut = residOutRef.get();
-
-        Datablob<T, Mat>* projBlob = _blob->GetBlob("CSA_ProjLayer");
-        auto projOutRef = projBlob->AcquireMatrix("Output_0");
-
-        const AttentionDims dims    = GetDims(_blob, input);
-        const uint32_t      nHead   = dims.nHead;
-        const uint32_t      dT      = dims.T_block_size;
-        const uint32_t      dB      = dims.B_batch;
-        const uint32_t      dC      = dims.C_EmbedDims;
-        const uint32_t      headDim = dims.headDim;
-
-        // 2) Project input into packed QKV (3C) using the attention dense layer.
-        Mat* attentionInput = input;
-        m_attentionBlob->Set("Input_0", attentionInput);
-        m_attention->Forward(m_attentionBlob);
-        
-        // 3) Split packed QKV into separate buffers. Each row is [Query | Key | Value] in row-major order.
-        SplitQKV(Query, Key, Value, attentionOutRef.get());
-
-        for (uint32_t head = 0; head < nHead; ++head)
-        {
-            Mat* attProbsAll = _blob->AcquireMatrix(HeadAttKey(head).c_str()).get();
-            for (uint32_t batch = 0; batch < dB; ++batch)
-            {
-                // Get each head for Query/Key/Value in this batch.
-                Mat QueryBatch;
-                Query->GetSliceZ(&QueryBatch, batch);
-                Mat QueryHead;
-                QueryHead.SetData(QueryBatch.GetData(), QueryBatch.GetOffset() + head * headDim);
-                QueryHead.SetDims({ headDim, dT });
-
-                Mat KeyBatch;
-                Key->GetSliceZ(&KeyBatch, batch);
-                Mat KeyHead;
-                KeyHead.SetData(KeyBatch.GetData(), KeyBatch.GetOffset() + head * headDim);
-                KeyHead.SetDims({ headDim, dT });
-
-                // 4a) Compute attention scores for this head and batch.
-                Mat attScores;
-                attScoresAll->GetSliceZ(&attScores, head);
-                MatMul_Strided<TransposeMode::Right>(&attScores,
-                                                     &QueryHead,
-                                                     &KeyHead,
-                                                     dC, 1u,
-                                                     dC, 1u,
-                                                     dT, 1u);
-
-                // 4b) Compute probability scores for this head and batch.
-                ScaleAdd(&attScores, &attScores, scalarScale, triMask);
-
-                // 5) Convert to probabilities.
-                Mat attProbs;
-                attProbsAll->GetSliceZ(&attProbs, batch);
-                Softmax(&attProbs, &attScores);
-            }
-
-            // 6) Dropout on attention weights (per-head), if set.
-            Mat* attDroppedAll = attProbsAll;
-            Datablob<T, Mat>* attentionDropoutBlob = GetAttentionDropoutBlob(_blob, head);
-            if (attentionDropoutBlob)
-            {
-                m_attentionDropout->SetInput(attentionDropoutBlob, attProbsAll);
-                m_attentionDropout->Forward(attentionDropoutBlob);
-                Mat* dropped = m_attentionDropout->GetOutput(attentionDropoutBlob).get();
-                if (dropped)
-                {
-                    attDroppedAll = dropped;
-                }
-            }
-
-            for (uint32_t batch = 0; batch < dB; ++batch)
-            {
-                Mat ValueBatch;
-                Value->GetSliceZ(&ValueBatch, batch);
-                Mat ValueHead;
-                ValueHead.SetData(ValueBatch.GetData(), ValueBatch.GetOffset() + head * headDim);
-                ValueHead.SetDims({ headDim, dT });
-
-                Mat yBatch;
-                yCombined->GetSliceZ(&yBatch, batch);
-                Mat YPerHeadOutput;
-                YPerHeadOutput.SetData(yBatch.GetData(), yBatch.GetOffset() + head * headDim);
-                YPerHeadOutput.SetDims({ headDim, dT });
-
-                Mat attDropped;
-                attDroppedAll->GetSliceZ(&attDropped, batch);
-                // 7) Weighted sum of values: y = att * ValueHead.
-                MatMul_Strided<TransposeMode::None>(&YPerHeadOutput,
-                                                    &attDropped,
-                                                    &ValueHead,
-                                                    dT, 1u,
-                                                    dC, 1u,
-                                                    dC, 1u);
-            }
-        }
-
-        // 8) Output projection back to embedding size, then residual dropout.
-        m_proj->SetInput(projBlob, yCombined);
-        m_proj->Forward(projBlob);
-
-        // 9) Final drop out and copy to output.
-        if (residualDropoutBlob && residualDropoutBlob->GetFloat("Probability") > 0.f)
-        {
-            m_residualDropout->SetInput(residualDropoutBlob, projOutRef.get());
-            m_residualDropout->Forward(residualDropoutBlob);
-            Copy(output, residOut);
-        }
-        else
-            Copy(output, m_proj->GetOutput(projBlob).get());
+        EnsureOutputsAllocated(blob);
+        Mat* input=blob->GetMatrix("Input_0");const auto dims=GetShape(blob,input);
+        auto* attention=blob->GetBlob("CSA_AttentionLayer");
+        m_attention->SetInput(attention,input);m_attention->Forward(attention);
+        SplitQKV(blob->GetMatrix("Scratch_Q"),blob->GetMatrix("Scratch_K"),blob->GetMatrix("Scratch_V"),attention->GetMatrix("Output_0"));
+        const auto heads=MatrixShape::Image(dims.B_batch,dims.nHead,dims.headDim,dims.T_block_size);
+        auto q=this->CachedView(blob,"Scratch_QHeads",blob->AcquireMatrix("Scratch_Q"),heads);
+        auto k=this->CachedView(blob,"Scratch_KHeads",blob->AcquireMatrix("Scratch_K"),heads);
+        auto v=this->CachedView(blob,"Scratch_VHeads",blob->AcquireMatrix("Scratch_V"),heads);
+        auto y=this->CachedView(blob,"Scratch_YHeads",blob->AcquireMatrix("Scratch_Y"),heads);
+        const MatrixStrides features{dims.C_EmbedDims,1u,dims.headDim,dims.T_block_size*dims.C_EmbedDims};
+        const MatrixStrides scores{dims.T_block_size,1u,dims.T_block_size*dims.T_block_size};
+        Mat* score=blob->GetMatrix("Scratch_dScores");
+        MatMul_Batched<TransposeMode::Right>(score,q.get(),k.get(),scores,features,features);
+        Scale(score,score,blob->GetMatrix("ScalarScale"));
+        Add(score,score,blob->GetMatrix("TriangleMatrix"));
+        Mat* probabilities=blob->GetMatrix("AttentionProbsAll");Softmax(probabilities,score);
+        auto* dropout=blob->GetBlob("CSA_AttentionDropout");
+        m_attentionDropout->SetInput(dropout,probabilities);m_attentionDropout->Run(dropout);
+        Copy(blob->GetMatrix("AttentionDroppedAll"),dropout->GetMatrix("Output_0"));
+        MatMul_Batched<TransposeMode::None>(y.get(),blob->GetMatrix("AttentionDroppedAll"),v.get(),features,scores,features);
+        auto* projection=blob->GetBlob("CSA_ProjLayer");
+        m_proj->SetInput(projection,blob->GetMatrix("Scratch_Y"));m_proj->Forward(projection);
+        auto* residual=blob->GetBlob("CSA_ResidualDropout");
+        m_residualDropout->SetInput(residual,projection->GetMatrix("Output_0"));m_residualDropout->Run(residual);
+        Copy(blob->GetMatrix("Output_0"),residual->GetMatrix("Output_0"));
     }
 
-    void Backwards(Datablob<T, Mat>* _blob) override
+    void Backwards(Datablob<T,Mat>* blob) override
     {
-        // Get all the variables together.
-        auto errorRef      = _blob->AcquireMatrix("ErrorInput_0");
-        Mat* error         = errorRef.get();
-        auto errorOutRef   = _blob->AcquireMatrix("ErrorOutput_0");
-        Mat* errorOut      = errorOutRef.get();
-        auto lastInputRef  = _blob->AcquireMatrix("Input_0");
-        Mat* lastInput     = lastInputRef.get();
-
-        const AttentionDims dims = GetDims(_blob, lastInput);
-        const uint32_t nHead     = dims.nHead;
-        const uint32_t dT        = dims.T_block_size;
-        const uint32_t dC        = dims.C_EmbedDims;
-        const uint32_t headDim   = dims.headDim;
-        auto scalarScaleRef      = _blob->AcquireMatrix("ScalarScale");
-        Mat* scalarScale         = scalarScaleRef.get();
-        assert(scalarScale);
-
-        auto vRef          = _blob->AcquireMatrix("Scratch_V");
-        auto dAttAllRef    = _blob->AcquireMatrix("Scratch_dAtt");
-        auto dScoresAllRef = _blob->AcquireMatrix("Scratch_dScores");
-        auto qRef          = _blob->AcquireMatrix("Scratch_Q");
-        auto kRef          = _blob->AcquireMatrix("Scratch_K");
-        auto qkvGradRef    = _blob->AcquireMatrix("Scratch_QKVGrad");
-        auto dQhAllRef     = _blob->AcquireMatrix("Scratch_dQh");
-        auto dKhAllRef     = _blob->AcquireMatrix("Scratch_dKh");
-        auto dVhAllRef     = _blob->AcquireMatrix("Scratch_dVh");
-
-        Mat* V          = vRef.get();
-        Mat* dAttAll    = dAttAllRef.get();
-        Mat* dScoresAll = dScoresAllRef.get();
-        Mat* Q          = qRef.get();
-        Mat* K          = kRef.get();
-        Mat* qkvGrad    = qkvGradRef.get();
-        Mat* dQhAll     = dQhAllRef.get();
-        Mat* dKhAll     = dKhAllRef.get();
-        Mat* dVhAll     = dVhAllRef.get();
-
-        // 9) Drop out backwards.
-        Datablob<T, Mat>* residualDropoutBlob = _blob->GetBlob("CSA_ResidualDropout");
-        Mat* projErrorIn = error;
-        if (residualDropoutBlob && residualDropoutBlob->GetFloat("Probability") > 0.f)
-        {
-            m_residualDropout->SetErrorInput(residualDropoutBlob, error);
-            m_residualDropout->Backwards(residualDropoutBlob);
-            projErrorIn = m_residualDropout->GetOutputError(residualDropoutBlob).get();
-        }
-
-        // 8) Projection backwards.
-        Datablob<T, Mat>* projBlob = _blob->GetBlob("CSA_ProjLayer");
-        auto yRef = _blob->AcquireMatrix("Scratch_Y");
-        auto dYRef = _blob->AcquireMatrix("Scratch_dY");
-        Mat* dY = dYRef.get();
-
-        m_proj->SetInput(projBlob, yRef);
-        m_proj->SetErrorInput(projBlob, projErrorIn);
-        m_proj->Backwards(projBlob);
-        Copy(dY, m_proj->GetOutputError(projBlob).get());
-
-
-        Mat qHeads, kHeads, vHeads, dyHeads;
-        Q->GetSliceZ(&qHeads, 0); qHeads.SetDims({headDim, dT, nHead});
-        K->GetSliceZ(&kHeads, 0); kHeads.SetDims({headDim, dT, nHead});
-        V->GetSliceZ(&vHeads, 0); vHeads.SetDims({headDim, dT, nHead});
-        dY->GetSliceZ(&dyHeads, 0); dyHeads.SetDims({headDim, dT, nHead});
-        const MatrixStrides featureStrides{dC, 1u, headDim};
-        const MatrixStrides scoreStrides{dT, 1u, dT * dT};
-        const MatrixStrides gradientStrides{headDim, 1u, dT * headDim};
-        auto droppedRef = _blob->AcquireMatrix("AttentionDroppedAll");
-        MatMul_Batched<TransposeMode::Right>(dAttAll, &dyHeads, &vHeads,
-                                             scoreStrides, featureStrides, featureStrides);
-        MatMul_Batched<TransposeMode::Left>(dVhAll, droppedRef.get(), &dyHeads,
-                                            gradientStrides, scoreStrides, featureStrides);
-
-        for (uint32_t head = 0; head < nHead; ++head)
-        {
-            Datablob<T, Mat>* attentionDropoutBlob = GetAttentionDropoutBlob(_blob, head);
-            auto dAttRef = _blob->AcquireMatrix("Scratch_dAttHead_" + std::to_string(head));
-            Mat* dAtt = dAttRef.get();
-
-            // 6)
-            if (attentionDropoutBlob && attentionDropoutBlob->GetFloat("Probability") > 0.f)
-            {
-                m_attentionDropout->SetErrorInput(attentionDropoutBlob, dAttRef);
-                m_attentionDropout->Backwards(attentionDropoutBlob);
-                Copy(dAtt, m_attentionDropout->GetOutputError(attentionDropoutBlob).get());
-            }
-
-        }
-        // 5) Softmax gradient, causal mask and scaling for every head in one pass.
-        auto probsRef = _blob->AcquireMatrix("AttentionProbsAll");
-        AttentionScoresBackwards(dScoresAll, probsRef.get(), dAttAll, scalarScale);
-        MatMul_Batched<TransposeMode::None>(dQhAll, dScoresAll, &kHeads,
-                                            gradientStrides, scoreStrides, featureStrides);
-        MatMul_Batched<TransposeMode::Left>(dKhAll, dScoresAll, &qHeads,
-                                            gradientStrides, scoreStrides, featureStrides);
-        // 3) Merge all head gradients back to packed QKV layout with a single op.
-        MergeQKV(qkvGrad, dQhAll, dKhAll, dVhAll);
-
-        // 2)
-        Datablob<T, Mat>* attentionBlob = _blob->GetBlob("CSA_AttentionLayer");
-        m_attention->SetInput(attentionBlob, lastInput);
-        m_attention->SetErrorInput(attentionBlob, qkvGrad);
-        m_attention->Backwards(attentionBlob);
-
-        Copy(errorOut, m_attention->GetOutputError(attentionBlob).get());
-
-    }
-
-    private:
-    void BindHeadStorage(Datablob<T, Mat>* blob, const std::string& key,
-                         Mat* storage, uint32_t head, uint32_t batches, bool rebind)
-    {
-        MatrixManager<T, Mat>& inst = MatrixManager<T, Mat>::Instance();
-        Mat* oldView = blob->GetMatrix(key);
-        if (!rebind && oldView && inst.IsSkeleton(oldView)
-            && oldView->GetDimsZ() == batches) return;
-        if (oldView) inst.RemoveMatrix(oldView);
-        auto view = inst.GetSkeleton(key);
-        storage->GetSliceZ(view.get(), head * batches);
-        view->SetDims({storage->GetDimsX(), storage->GetDimsY(), batches});
-        blob->Set(key, view);
+        const auto dims=GetShape(blob,blob->GetMatrix("Input_0"));
+        auto* residual=blob->GetBlob("CSA_ResidualDropout");
+        m_residualDropout->SetErrorInput(residual,blob->GetMatrix("ErrorInput_0"));m_residualDropout->Backwards(residual);
+        auto* projection=blob->GetBlob("CSA_ProjLayer");
+        m_proj->SetErrorInput(projection,residual->GetMatrix("ErrorOutput_0"));m_proj->Backwards(projection);
+        const auto heads=MatrixShape::Image(dims.B_batch,dims.nHead,dims.headDim,dims.T_block_size);
+        auto q=this->CachedView(blob,"Scratch_QHeads",blob->AcquireMatrix("Scratch_Q"),heads);
+        auto k=this->CachedView(blob,"Scratch_KHeads",blob->AcquireMatrix("Scratch_K"),heads);
+        auto v=this->CachedView(blob,"Scratch_VHeads",blob->AcquireMatrix("Scratch_V"),heads);
+        auto dy=this->CachedView(blob,"GradientHeads",projection->AcquireMatrix("ErrorOutput_0"),heads);
+        const MatrixStrides features{dims.C_EmbedDims,1u,dims.headDim,dims.T_block_size*dims.C_EmbedDims};
+        const MatrixStrides scores{dims.T_block_size,1u,dims.T_block_size*dims.T_block_size};
+        const MatrixStrides gradients{dims.headDim,1u,dims.T_block_size*dims.headDim};
+        Mat* dAttention=blob->GetMatrix("Scratch_dAtt");
+        MatMul_Batched<TransposeMode::Right>(dAttention,dy.get(),v.get(),scores,features,features);
+        MatMul_Batched<TransposeMode::Left>(blob->GetMatrix("Scratch_dVh"),blob->GetMatrix("AttentionDroppedAll"),dy.get(),gradients,scores,features);
+        auto* dropout=blob->GetBlob("CSA_AttentionDropout");
+        m_attentionDropout->SetErrorInput(dropout,dAttention);m_attentionDropout->Backwards(dropout);
+        Mat* dScores=blob->GetMatrix("Scratch_dScores");
+        AttentionScoresBackwards(dScores,blob->GetMatrix("AttentionProbsAll"),dropout->GetMatrix("ErrorOutput_0"),blob->GetMatrix("ScalarScale"));
+        MatMul_Batched<TransposeMode::None>(blob->GetMatrix("Scratch_dQh"),dScores,k.get(),gradients,scores,features);
+        MatMul_Batched<TransposeMode::Left>(blob->GetMatrix("Scratch_dKh"),dScores,q.get(),gradients,scores,features);
+        MergeQKV(blob->GetMatrix("Scratch_QKVGrad"),blob->GetMatrix("Scratch_dQh"),blob->GetMatrix("Scratch_dKh"),blob->GetMatrix("Scratch_dVh"));
+        auto* attention=blob->GetBlob("CSA_AttentionLayer");
+        m_attention->SetErrorInput(attention,blob->GetMatrix("Scratch_QKVGrad"));m_attention->Backwards(attention);
+        Copy(blob->GetMatrix("ErrorOutput_0"),attention->GetMatrix("ErrorOutput_0"));
     }
 
     struct AttentionDims
@@ -668,33 +305,19 @@ class CausalSelfAttentionLayer : public Layer<T, Mat>
         uint32_t headDim = 0u;
     };
 
-    AttentionDims GetDims(Datablob<T, Mat>* _blob, Mat* _input) const
+    AttentionDims GetShape(Datablob<T, Mat>* _blob, Mat* _input) const
     {
         AttentionDims dims{};
-        dims.C_EmbedDims = _input->GetDimsX();
-        dims.T_block_size = _input->GetDimsY();
-        dims.B_batch = _input->GetDimsZ();
+        dims.C_EmbedDims = _input->GetWidth();
+        dims.T_block_size = _input->GetHeight();
+        dims.B_batch = _input->GetBatchCount();
+        if(_input->GetChannelCount()!=1u) throw std::invalid_argument("Attention expects sequence tensors.");
         dims.TB = dims.T_block_size * dims.B_batch;
         dims.nHead = _blob->GetUInt("NumHeads");
         assert(dims.nHead > 0u);
         assert(dims.C_EmbedDims % dims.nHead == 0u);
         dims.headDim = dims.C_EmbedDims / dims.nHead;
         return dims;
-    }
-
-    std::string AttentionDropoutKey(uint32_t _head) const
-    {
-        return "CSA_AttentionDropout_" + std::to_string(_head);
-    }
-
-    std::string HeadAttKey(uint32_t _head) const
-    {
-        return "Scratch_AttHead_" + std::to_string(_head);
-    }
-
-    Datablob<T, Mat>* GetAttentionDropoutBlob(Datablob<T, Mat>* _blob, uint32_t _head) const
-    {
-        return _blob->GetBlob(AttentionDropoutKey(_head));
     }
 
     void ReleaseSubblob(Datablob<T, Mat>* _blob)
@@ -724,12 +347,7 @@ class CausalSelfAttentionLayer : public Layer<T, Mat>
         _out.push_back(typename Layer<T,Mat>::sublayerinfo{"CSA_ProjLayer"      , m_proj             , _blob->GetBlob("CSA_ProjLayer")});
         _out.push_back(typename Layer<T,Mat>::sublayerinfo{"CSA_ResidualDropout", m_residualDropout  , _blob->GetBlob("CSA_ResidualDropout")});
 
-        const uint32_t nHead = _blob->GetUInt("NumHeads");
-        for (uint32_t head = 0; head < nHead; ++head)
-        {
-            Datablob<T, Mat>* attentionDropoutBlob = GetAttentionDropoutBlob(_blob, head);
-            _out.push_back(typename Layer<T,Mat>::sublayerinfo{AttentionDropoutKey(head), m_attentionDropout , _blob->GetBlob(AttentionDropoutKey(head))});
-        }
+        _out.push_back(typename Layer<T,Mat>::sublayerinfo{"CSA_AttentionDropout",m_attentionDropout,_blob->GetBlob("CSA_AttentionDropout")});
     }
 
     private:

@@ -8,9 +8,9 @@ struct MatrixParams
     uint dimz;
     uint offset;
     uint uniqueId;
-    uint pad0;
-    uint pad1;
-    uint pad2;
+    uint channels;
+    uint batch;
+    uint reserved;
 };
 
 kernel void mul(device float* out [[buffer(0)]],

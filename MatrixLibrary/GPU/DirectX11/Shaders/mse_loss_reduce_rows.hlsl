@@ -7,9 +7,9 @@ cbuffer MatOut_Params : register(b0)
     uint out_dimz;
     uint out_offset;
     uint out_uniqueId;
-    uint out_pad0;
-    uint out_pad1;
-    uint out_pad2;
+    uint out_channels;
+    uint out_batch;
+    uint out_reserved;
     uint4 out_optionalParams[4];
 };
 
@@ -20,9 +20,9 @@ cbuffer MatTarget_Params : register(b1)
     uint target_dimz;
     uint target_offset;
     uint target_uniqueId;
-    uint target_pad0;
-    uint target_pad1;
-    uint target_pad2;
+    uint target_channels;
+    uint target_batch;
+    uint target_reserved;
     uint4 target_optionalParams[4];
 };
 
@@ -33,9 +33,9 @@ cbuffer MatPrediction_Params : register(b2)
     uint prediction_dimz;
     uint prediction_offset;
     uint prediction_uniqueId;
-    uint prediction_pad0;
-    uint prediction_pad1;
-    uint prediction_pad2;
+    uint prediction_channels;
+    uint prediction_batch;
+    uint prediction_reserved;
     uint4 prediction_optionalParams[4];
 };
 

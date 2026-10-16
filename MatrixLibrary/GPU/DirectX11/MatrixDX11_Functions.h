@@ -25,11 +25,87 @@ inline bool SyncCBuffer(MatrixDX11<T>* mat)
     }
 
     return mat->m_gInstance->UpdateCachedCBuffer(mat->m_dataHandles.m_cbufferHandle,
-                                                 mat->GetDimsX(),
-                                                 mat->GetDimsY(),
-                                                 mat->GetDimsZ(),
+                                                 mat->GetWidth(),
+                                                 mat->GetHeight(),
+                                                 mat->GetPlaneCount(),
                                                  mat->m_offset,
-                                                 params.uniqueId);
+                                                 params.uniqueId, mat->GetChannelCount(), mat->GetBatchCount());
+}
+
+template<class T>
+void BroadcastBinary(MatrixDX11<T>* out, MatrixDX11<T>* left, MatrixDX11<T>* right, uint32_t operation)
+{
+    if (!out || !left || !right || operation>2u
+        || out->GetShape()!=left->GetShape().BroadcastWith(right->GetShape()))
+        throw std::invalid_argument("Broadcast operation output shape is incorrect.");
+    uint32_t flags=operation;
+    for (auto [input,bit] : {std::pair{left,4u},std::pair{right,8u}}) {
+        if(input->m_dataHandles.m_bufferHandle==out->m_dataHandles.m_bufferHandle) {
+            if(input->GetShape()!=out->GetShape() || input->GetOffset()!=out->GetOffset())
+                throw std::invalid_argument("Broadcast output cannot overlap a differently shaped input.");
+            flags|=bit;
+        }
+    }
+    for(auto* matrix : {out,left,right}) {
+        matrix->Unmap();if(!SyncCBuffer(matrix)) throw std::runtime_error("Cannot bind broadcast parameters.");
+    }
+    auto* gpu=out->m_gInstance;auto* context=gpu->GetContext();auto* shader=gpu->GetShader("broadcast_binary");
+    if(!context || !shader) throw std::runtime_error("DX11 broadcast pipeline is unavailable.");
+    const uint32_t groups=(out->GetElementCount()+255u)/256u,groupsX=std::min(groups,65535u);
+    const uint32_t optional[]={flags,groupsX};gpu->SetCBufferOptionalParams(out->m_dataHandles.m_cbufferHandle,optional,2u);
+    ID3D11Buffer* buffers[]={gpu->GetCBuffer(out->m_dataHandles.m_cbufferHandle),
+        gpu->GetCBuffer(left->m_dataHandles.m_cbufferHandle),gpu->GetCBuffer(right->m_dataHandles.m_cbufferHandle)};
+    ID3D11ShaderResourceView* srvs[]={(flags&4u)?nullptr:gpu->GetBufferSRV(left->m_dataHandles.m_bufferHandle),
+        (flags&8u)?nullptr:gpu->GetBufferSRV(right->m_dataHandles.m_bufferHandle)};
+    ID3D11UnorderedAccessView* uav=gpu->GetBufferUAV(out->m_dataHandles.m_bufferHandle);
+    context->CSSetShader(shader,nullptr,0u);context->CSSetConstantBuffers(0u,3u,buffers);
+    context->CSSetShaderResources(0u,2u,srvs);context->CSSetUnorderedAccessViews(0u,1u,&uav,nullptr);
+    context->Dispatch(groupsX,(groups+groupsX-1u)/groupsX,1u);
+    srvs[0]=srvs[1]=nullptr;uav=nullptr;
+    context->CSSetShaderResources(0u,2u,srvs);context->CSSetUnorderedAccessViews(0u,1u,&uav,nullptr);
+    context->CSSetShader(nullptr,nullptr,0u);
+}
+
+template<class T>
+void BroadcastMul(MatrixDX11<T>* out,MatrixDX11<T>* left,MatrixDX11<T>* right)
+{ BroadcastBinary(out,left,right,2u); }
+
+template<class T>
+void BroadcastAddRows(MatrixDX11<T>* out,MatrixDX11<T>* left,MatrixDX11<T>* right)
+{ BroadcastBinary(out,left,right,0u); }
+
+template<class T>
+void BroadcastSubRows(MatrixDX11<T>* out,MatrixDX11<T>* left,MatrixDX11<T>* right)
+{ BroadcastBinary(out,left,right,1u); }
+
+template<class T>
+void BroadcastMulRows(MatrixDX11<T>* out,MatrixDX11<T>* left,MatrixDX11<T>* right)
+{ BroadcastBinary(out,left,right,2u); }
+
+template<class T>
+void ReduceSum(MatrixDX11<T>* out, MatrixDX11<T>* input, MatrixAxes axes)
+{
+    if (!out || !input || out->GetShape() != input->GetShape().Reduced(axes))
+        throw std::invalid_argument("ReduceSum output shape is incorrect.");
+    if (out->m_dataHandles.m_bufferHandle == input->m_dataHandles.m_bufferHandle)
+        throw std::invalid_argument("ReduceSum requires distinct input and output storage.");
+    out->Unmap();input->Unmap();
+    auto* gpu=out->m_gInstance;auto* context=gpu->GetContext();
+    auto* shader=gpu->GetShader("reduce_sum");
+    if (!context || !shader || !SyncCBuffer(out) || !SyncCBuffer(input))
+        throw std::runtime_error("DX11 reduction pipeline is unavailable.");
+    const uint32_t groupsX=std::min(out->GetElementCount(),65535u);
+    const uint32_t optional[]={static_cast<uint32_t>(axes),groupsX};
+    gpu->SetCBufferOptionalParams(out->m_dataHandles.m_cbufferHandle,optional,2u);
+    ID3D11Buffer* buffers[]={gpu->GetCBuffer(out->m_dataHandles.m_cbufferHandle),gpu->GetCBuffer(input->m_dataHandles.m_cbufferHandle)};
+    ID3D11ShaderResourceView* srv=gpu->GetBufferSRV(input->m_dataHandles.m_bufferHandle);
+    ID3D11UnorderedAccessView* uav=gpu->GetBufferUAV(out->m_dataHandles.m_bufferHandle);
+    context->CSSetShader(shader,nullptr,0u);context->CSSetConstantBuffers(0u,2u,buffers);
+    context->CSSetShaderResources(0u,1u,&srv);context->CSSetUnorderedAccessViews(0u,1u,&uav,nullptr);
+    context->Dispatch(groupsX,(out->GetElementCount()+groupsX-1u)/groupsX,1u);
+    srv=nullptr;uav=nullptr;
+    context->CSSetShaderResources(0u,1u,&srv);context->CSSetUnorderedAccessViews(0u,1u,&uav,nullptr);
+    context->CSSetShader(nullptr,nullptr,0u);
 }
 
 template<class T>
@@ -185,11 +261,11 @@ void ConcatZ(MatrixDX11<T>* _out, MatrixDX11<T>* _A, MatrixDX11<T>* _B)
     assert(_out);
     assert(_A);
     assert(_B);
-    assert(_A->GetDimsX() == _B->GetDimsX());
-    assert(_A->GetDimsY() == _B->GetDimsY());
-    assert(_out->GetDimsX() == _A->GetDimsX());
-    assert(_out->GetDimsY() == _A->GetDimsY());
-    assert(_out->GetDimsZ() == _A->GetDimsZ() + _B->GetDimsZ());
+    assert(_A->GetWidth() == _B->GetWidth());
+    assert(_A->GetHeight() == _B->GetHeight());
+    assert(_out->GetWidth() == _A->GetWidth());
+    assert(_out->GetHeight() == _A->GetHeight());
+    assert(_out->GetPlaneCount() == _A->GetPlaneCount() + _B->GetPlaneCount());
 
     const uint32_t countA = _A->GetElementCount();
     const uint32_t countB = _B->GetElementCount();
@@ -204,11 +280,11 @@ void GatherRows(MatrixDX11<T>* _out, MatrixDX11<T>* _src, MatrixDX11<T>* _indice
     assert(_out);
     assert(_src);
     assert(_indices);
-    assert(_indices->GetDimsX() == 1u);
-    assert(_out->GetDimsX() == _src->GetDimsX());
-    assert(_out->GetDimsY() == _indices->GetDimsY());
-    assert(_out->GetDimsZ() == _indices->GetDimsZ());
-    assert(_src->GetDimsZ() == 1u || _src->GetDimsZ() == _out->GetDimsZ());
+    assert(_indices->GetWidth() == 1u);
+    assert(_out->GetWidth() == _src->GetWidth());
+    assert(_out->GetHeight() == _indices->GetHeight());
+    assert(_out->GetPlaneCount() == _indices->GetPlaneCount());
+    assert(_src->GetPlaneCount() == 1u || _src->GetPlaneCount() == _out->GetPlaneCount());
 
     _out->Unmap();
     _src->Unmap();
@@ -272,11 +348,11 @@ void ScatterRows(MatrixDX11<T>* _out, MatrixDX11<T>* _src, MatrixDX11<T>* _indic
     assert(_out);
     assert(_src);
     assert(_indices);
-    assert(_indices->GetDimsX() == 1u);
-    assert(_src->GetDimsX() == _out->GetDimsX());
-    assert(_src->GetDimsY() == _indices->GetDimsY());
-    assert(_src->GetDimsZ() == _indices->GetDimsZ());
-    assert(_out->GetDimsZ() == 1u || _out->GetDimsZ() == _src->GetDimsZ());
+    assert(_indices->GetWidth() == 1u);
+    assert(_src->GetWidth() == _out->GetWidth());
+    assert(_src->GetHeight() == _indices->GetHeight());
+    assert(_src->GetPlaneCount() == _indices->GetPlaneCount());
+    assert(_out->GetPlaneCount() == 1u || _out->GetPlaneCount() == _src->GetPlaneCount());
 
     _out->Unmap();
     _src->Unmap();
@@ -340,11 +416,11 @@ void ScatterAddRows(MatrixDX11<T>* _out, MatrixDX11<T>* _src, MatrixDX11<T>* _in
     assert(_out);
     assert(_src);
     assert(_indices);
-    assert(_indices->GetDimsX() == 1u);
-    assert(_src->GetDimsX() == _out->GetDimsX());
-    assert(_src->GetDimsY() == _indices->GetDimsY());
-    assert(_src->GetDimsZ() == _indices->GetDimsZ());
-    assert(_out->GetDimsZ() == 1u || _out->GetDimsZ() == _src->GetDimsZ());
+    assert(_indices->GetWidth() == 1u);
+    assert(_src->GetWidth() == _out->GetWidth());
+    assert(_src->GetHeight() == _indices->GetHeight());
+    assert(_src->GetPlaneCount() == _indices->GetPlaneCount());
+    assert(_out->GetPlaneCount() == 1u || _out->GetPlaneCount() == _src->GetPlaneCount());
 
     const uint32_t outCount = _out->GetElementCount();
     if (outCount == 0u)
@@ -423,13 +499,13 @@ void SplitQKV(MatrixDX11<T>* _q,
     {
         return;
     }
-    const uint32_t dC = _q->GetDimsX();
-    const uint32_t rows = _q->GetDimsY() * _q->GetDimsZ();
+    const uint32_t dC = _q->GetWidth();
+    const uint32_t rows = _q->GetHeight() * _q->GetPlaneCount();
     assert(_k->GetElementCount() == qCount);
     assert(_v->GetElementCount() == qCount);
     assert(_packed->GetElementCount() == qCount * 3u);
-    assert(_packed->GetDimsX() == dC * 3u);
-    assert((_packed->GetDimsY() * _packed->GetDimsZ()) == rows);
+    assert(_packed->GetWidth() == dC * 3u);
+    assert((_packed->GetHeight() * _packed->GetPlaneCount()) == rows);
 
     _q->Unmap();
     _k->Unmap();
@@ -501,9 +577,9 @@ void MergeQKV(MatrixDX11<T>* _packedQKV,
     assert(_kHeads);
     assert(_vHeads);
 
-    const uint32_t headDim = _qHeads->GetDimsX();
-    const uint32_t tokens = _qHeads->GetDimsY();
-    const uint32_t nHead = _qHeads->GetDimsZ();
+    const uint32_t headDim = _qHeads->GetWidth();
+    const uint32_t tokens = _qHeads->GetHeight();
+    const uint32_t nHead = _qHeads->GetChannelCount();
     const uint32_t dC = headDim * nHead;
     const uint32_t qCount = _qHeads->GetElementCount();
     if (qCount == 0u)
@@ -511,18 +587,18 @@ void MergeQKV(MatrixDX11<T>* _packedQKV,
         return;
     }
 
-    assert(_kHeads->GetDimsX() == headDim);
-    assert(_kHeads->GetDimsY() == tokens);
-    assert(_kHeads->GetDimsZ() == nHead);
-    assert(_vHeads->GetDimsX() == headDim);
-    assert(_vHeads->GetDimsY() == tokens);
-    assert(_vHeads->GetDimsZ() == nHead);
+    assert(_kHeads->GetWidth() == headDim);
+    assert(_kHeads->GetHeight() == tokens);
+    assert(_kHeads->GetChannelCount() == nHead);
+    assert(_vHeads->GetWidth() == headDim);
+    assert(_vHeads->GetHeight() == tokens);
+    assert(_vHeads->GetChannelCount() == nHead);
     assert(_kHeads->GetElementCount() == qCount);
     assert(_vHeads->GetElementCount() == qCount);
 
-    assert(_packedQKV->GetDimsX() == 3u * dC);
-    assert(_packedQKV->GetDimsY() == tokens);
-    assert(_packedQKV->GetDimsZ() == 1u);
+    assert(_packedQKV->GetWidth() == 3u * dC);
+    assert(_packedQKV->GetHeight() == tokens);
+    assert(_packedQKV->GetChannelCount() == 1u && _packedQKV->GetBatchCount() == _qHeads->GetBatchCount());
     assert(_packedQKV->GetElementCount() == qCount * 3u);
 
     _packedQKV->Unmap();
@@ -586,6 +662,8 @@ void MergeQKV(MatrixDX11<T>* _packedQKV,
 template<class T>
 void Add(MatrixDX11<T>* _out, MatrixDX11<T>* _L, MatrixDX11<T>* _R)
 {
+    if (_out->GetShape()!=_L->GetShape() || _out->GetShape()!=_R->GetShape())
+    { BroadcastBinary(_out,_L,_R,0u);return; }
     assert(_out);
     assert(_L);
     assert(_R);
@@ -719,9 +797,9 @@ T MeanSquaredErrorLoss(MatrixDX11<T>* target, MatrixDX11<T>* prediction)
 {
     assert(target);
     assert(prediction);
-    assert(target->GetDimsX() == prediction->GetDimsX());
-    assert(target->GetDimsY() == prediction->GetDimsY());
-    assert(target->GetDimsZ() == prediction->GetDimsZ());
+    assert(target->GetWidth() == prediction->GetWidth());
+    assert(target->GetHeight() == prediction->GetHeight());
+    assert(target->GetPlaneCount() == prediction->GetPlaneCount());
 
     const uint32_t count = target->GetElementCount();
     if (count == 0u)
@@ -729,15 +807,15 @@ T MeanSquaredErrorLoss(MatrixDX11<T>* target, MatrixDX11<T>* prediction)
         return T(0);
     }
 
-    const uint32_t rows = prediction->GetDimsY() * prediction->GetDimsZ();
+    const uint32_t rows = prediction->GetHeight() * prediction->GetPlaneCount();
     if (rows == 0u)
     {
         return T(0);
     }
 
     MatrixManager<T, MatrixDX11<T>>& inst = MatrixManager<T, MatrixDX11<T>>::Instance();
-    MatrixDX11<T>* rowScratch = inst.GetScratch({ 1u, rows, 1u });
-    MatrixDX11<T>* scalarScratch = inst.GetScratch({ 1u, 1u, 1u });
+    MatrixDX11<T>* rowScratch = inst.GetScratch(MatrixShape::Matrix(1u,rows));
+    MatrixDX11<T>* scalarScratch = inst.GetScratch(MatrixShape::Matrix(1u,1u));
     if (!rowScratch || !scalarScratch)
     {
         return T(0);
@@ -840,6 +918,8 @@ T MeanSquaredErrorLoss(MatrixDX11<T>* target, MatrixDX11<T>* prediction)
 template<class T>
 void Sub(MatrixDX11<T>* _out, MatrixDX11<T>* _L, MatrixDX11<T>* _R)
 {
+    if (_out->GetShape()!=_L->GetShape() || _out->GetShape()!=_R->GetShape())
+    { BroadcastBinary(_out,_L,_R,1u);return; }
     assert(_out);
     assert(_L);
     assert(_R);
@@ -979,14 +1059,12 @@ template<class T>
 void SumSpatialDimension(MatrixDX11<T>* _out,
                          MatrixDX11<T>* _in,
                          uint32_t _zLayer,
-                         const Dims3D& _outCoord)
+                         const MatrixCoordinate& _outCoord)
 {
     assert(_out);
     assert(_in);
-    assert(_zLayer < _in->GetDimsZ());
-    assert(_outCoord.x < _out->GetDimsX());
-    assert(_outCoord.y < _out->GetDimsY());
-    assert(_outCoord.z < _out->GetDimsZ());
+    assert(_zLayer < _in->GetPlaneCount());
+    _out->GetShape().Index(_outCoord.batch,_outCoord.channel,_outCoord.x,_outCoord.y);
 
     _out->Unmap();
     _in->Unmap();
@@ -1004,7 +1082,7 @@ void SumSpatialDimension(MatrixDX11<T>* _out,
         return;
     }
 
-    const uint32_t optionalParams[4] = { _zLayer, _outCoord.x, _outCoord.y, _outCoord.z };
+    const uint32_t optionalParams[4] = { _zLayer, _outCoord.x, _outCoord.y, _outCoord.batch*_out->GetChannelCount()+_outCoord.channel };
     if (!manager->SetCBufferOptionalParams(_out->m_dataHandles.m_cbufferHandle, optionalParams, 4u))
     {
         return;
@@ -1046,84 +1124,7 @@ void SumSpatialDimension(MatrixDX11<T>* _out,
 
 template<class T>
 void BroadcastAdd(MatrixDX11<T>* _out, MatrixDX11<T>* _L, MatrixDX11<T>* _R)
-{
-    assert(_out);
-    assert(_L);
-    assert(_R);
-    assert(_out->GetDimsX() == _L->GetDimsX());
-    assert(_out->GetDimsY() == _L->GetDimsY());
-    assert(_out->GetDimsZ() == _L->GetDimsZ());
-    assert(_R->GetElementCount() >= _L->GetDimsX());
-
-    DirectX11Manager::Instance()->DumpInfoQueueErrors();
-
-    _out->Unmap();
-    _L->Unmap();
-    _R->Unmap();
-
-    DirectX11Manager* manager = _out->m_gInstance;
-    ID3D11DeviceContext* context = manager ? manager->GetContext() : nullptr;
-    ID3D11ComputeShader* shader = manager ? manager->GetShader("broadcast_add") : nullptr;
-    if (!manager || !context || !shader)
-    {
-        return;
-    }
-
-    ID3D11Buffer* outBuffer = manager->GetBuffer(_out->m_dataHandles.m_bufferHandle);
-    ID3D11Buffer* leftBuffer = manager->GetBuffer(_L->m_dataHandles.m_bufferHandle);
-    if (!outBuffer || !leftBuffer)
-    {
-        return;
-    }
-
-    if (outBuffer != leftBuffer)
-    {
-        Copy(_out, _L);
-        _out->Unmap();
-    }
-
-    if (!SyncCBuffer(_out) || !SyncCBuffer(_R))
-    {
-        return;
-    }
-
-    ID3D11Buffer* outCBuffer = manager->GetCBuffer(_out->m_dataHandles.m_cbufferHandle);
-    ID3D11Buffer* biasCBuffer = manager->GetCBuffer(_R->m_dataHandles.m_cbufferHandle);
-    if (!outCBuffer || !biasCBuffer)
-    {
-        return;
-    }
-
-    ID3D11ShaderResourceView* biasSRV = manager->GetBufferSRV(_R->m_dataHandles.m_bufferHandle);
-    ID3D11UnorderedAccessView* outUAV = manager->GetBufferUAV(_out->m_dataHandles.m_bufferHandle);
-    if (!biasSRV || !outUAV)
-    {
-        return;
-    }
-
-    context->CSSetShader(shader, nullptr, 0u);
-    ID3D11ShaderResourceView* srvs[] = { biasSRV };
-    context->CSSetShaderResources(1u, 1u, srvs);
-    ID3D11UnorderedAccessView* uavs[] = { outUAV };
-    context->CSSetUnorderedAccessViews(0u, 1u, uavs, nullptr);
-    ID3D11Buffer* cbs[] = { outCBuffer, biasCBuffer };
-    context->CSSetConstantBuffers(0u, 2u, cbs);
-
-    const uint32_t elementCount = _out->GetElementCount();
-    const uint32_t threadsPerGroup = 256u;
-    const uint32_t groupCount = (elementCount + threadsPerGroup - 1u) / threadsPerGroup;
-    context->Dispatch(groupCount, 1u, 1u);
-
-    ID3D11UnorderedAccessView* nullUAVs[] = { nullptr };
-    context->CSSetUnorderedAccessViews(0u, 1u, nullUAVs, nullptr);
-    ID3D11ShaderResourceView* nullSRVs[] = { nullptr };
-    context->CSSetShaderResources(1u, 1u, nullSRVs);
-    context->CSSetShader(nullptr, nullptr, 0u);
-    DirectX11Manager::Instance()->DumpInfoQueueErrors();
-
-    if (GPUSyncCalls)
-        DirectX11Manager::Instance()->WaitForGPU();
-}
+{ BroadcastBinary(_out,_L,_R,0u); }
 
 template<class T>
 void LayerNormOp(MatrixDX11<T>* _out,
@@ -1140,14 +1141,14 @@ void LayerNormOp(MatrixDX11<T>* _out,
     if (_invStd)
     {
         assert(_xHat);
-        assert(_invStd->GetDimsX() == 1u);
-        assert(_invStd->GetDimsY() == _in->GetDimsY());
-        assert(_invStd->GetDimsZ() == _in->GetDimsZ());
+        assert(_invStd->GetWidth() == 1u);
+        assert(_invStd->GetHeight() == _in->GetHeight());
+        assert(_invStd->GetPlaneCount() == _in->GetPlaneCount());
     }
 
-    assert(_out->GetDimsX() == _in->GetDimsX());
-    assert(_out->GetDimsY() == _in->GetDimsY());
-    assert(_out->GetDimsZ() == _in->GetDimsZ());
+    assert(_out->GetWidth() == _in->GetWidth());
+    assert(_out->GetHeight() == _in->GetHeight());
+    assert(_out->GetPlaneCount() == _in->GetPlaneCount());
     (void)_eps;
     if (_invStd) _invStd->Unmap();
 
@@ -1277,7 +1278,7 @@ void LayerNormOp(MatrixDX11<T>* _out,
     context->CSSetUnorderedAccessViews(0u, uavCount, uavs, nullptr);
 
     // One group per row: each group of 256 threads cooperatively reduces its row.
-    const uint32_t rowCount = _out->GetDimsY() * _out->GetDimsZ();
+    const uint32_t rowCount = _out->GetHeight() * _out->GetPlaneCount();
     context->Dispatch(rowCount, 1u, 1u);
 
     ID3D11UnorderedAccessView* nullUAVs[] = { nullptr, nullptr, nullptr };
@@ -1308,20 +1309,20 @@ void LayerNormBackwardsOp(MatrixDX11<T>* _dX,
     if (_invStd)
     {
         assert(_xHat);
-        assert(_invStd->GetDimsX() == 1u);
-        assert(_invStd->GetDimsY() == _in->GetDimsY());
-        assert(_invStd->GetDimsZ() == _in->GetDimsZ());
+        assert(_invStd->GetWidth() == 1u);
+        assert(_invStd->GetHeight() == _in->GetHeight());
+        assert(_invStd->GetPlaneCount() == _in->GetPlaneCount());
     }
 
     assert(_dGamma);
-    assert(_dX->GetDimsX() == _in->GetDimsX());
-    assert(_dX->GetDimsY() == _in->GetDimsY());
-    assert(_dX->GetDimsZ() == _in->GetDimsZ());
-    assert(_dY->GetDimsX() == _in->GetDimsX());
-    assert(_dY->GetDimsY() == _in->GetDimsY());
-    assert(_dY->GetDimsZ() == _in->GetDimsZ());
-    assert(_gamma->GetDimsX() == _in->GetDimsX());
-    assert(_dGamma->GetDimsX() == _in->GetDimsX());
+    assert(_dX->GetWidth() == _in->GetWidth());
+    assert(_dX->GetHeight() == _in->GetHeight());
+    assert(_dX->GetPlaneCount() == _in->GetPlaneCount());
+    assert(_dY->GetWidth() == _in->GetWidth());
+    assert(_dY->GetHeight() == _in->GetHeight());
+    assert(_dY->GetPlaneCount() == _in->GetPlaneCount());
+    assert(_gamma->GetWidth() == _in->GetWidth());
+    assert(_dGamma->GetWidth() == _in->GetWidth());
     (void)_eps;
     if (_invStd) _invStd->Unmap();
 
@@ -1413,7 +1414,7 @@ void LayerNormBackwardsOp(MatrixDX11<T>* _dX,
     cbsParams[paramsCbCount++] = xHatCBuffer;
     context->CSSetConstantBuffers(0u, paramsCbCount, cbsParams);
 
-    const uint32_t cols = _dGamma->GetDimsX();
+    const uint32_t cols = _dGamma->GetWidth();
     const uint32_t threadsPerGroup = 256u;
     const uint32_t groupCount = (cols + threadsPerGroup - 1u) / threadsPerGroup;
     context->Dispatch(groupCount, 1u, 1u);
@@ -1457,7 +1458,7 @@ void LayerNormBackwardsOp(MatrixDX11<T>* _dX,
     context->CSSetConstantBuffers(0u, _invStd ? 5u : 4u, cbsDX);
 
     // One group per row, matching the forward dispatch.
-    const uint32_t rowCountDX = _dX->GetDimsY() * _dX->GetDimsZ();
+    const uint32_t rowCountDX = _dX->GetHeight() * _dX->GetPlaneCount();
     context->Dispatch(rowCountDX, 1u, 1u);
 
     ID3D11UnorderedAccessView* nullUAVsDX[] = { nullptr };
@@ -1690,9 +1691,9 @@ void TransposeMat(MatrixDX11<T>* _out, MatrixDX11<T>* _in)
 {
     assert(_out);
     assert(_in);
-    assert(_out->GetDimsX() == _in->GetDimsY());
-    assert(_out->GetDimsY() == _in->GetDimsX());
-    assert(_out->GetDimsZ() == _in->GetDimsZ());
+    assert(_out->GetWidth() == _in->GetHeight());
+    assert(_out->GetHeight() == _in->GetWidth());
+    assert(_out->GetPlaneCount() == _in->GetPlaneCount());
 
     DirectX11Manager::Instance()->DumpInfoQueueErrors();
 
@@ -1771,7 +1772,7 @@ void Conv2DSingleChannel(MatrixDX11<T>* output,
     assert(output);
     assert(input);
     assert(kernelWeights);
-    assert(outputChannel < output->GetDimsZ());
+    assert(outputChannel < output->GetChannelCount());
     DirectX11Manager::Instance()->DumpInfoQueueErrors();
 
     output->Unmap();
@@ -1843,7 +1844,7 @@ void Conv2DSingleChannel(MatrixDX11<T>* output,
     ID3D11UnorderedAccessView* uavs[] = { outUAV };
     context->CSSetUnorderedAccessViews(0u, 1u, uavs, nullptr);
 
-    const uint32_t elementCount = output->GetDimsX() * output->GetDimsY();
+    const uint32_t elementCount = output->GetWidth() * output->GetHeight() * output->GetBatchCount();
     const uint32_t threadsPerGroup = 256u;
     const uint32_t groupCount = (elementCount + threadsPerGroup - 1u) / threadsPerGroup;
     context->Dispatch(groupCount, 1u, 1u);
@@ -1881,8 +1882,8 @@ void Conv2DSingleChannelBackwards(MatrixDX11<T>* errorIn,
     assert(errorIn);
     assert(input);
     assert(kernel);
-    assert(outputChannel < errorIn->GetDimsZ());
-    assert(kernel->GetDimsZ() == input->GetDimsZ());
+    assert(outputChannel < errorIn->GetChannelCount());
+    assert(kernel->GetChannelCount() == input->GetChannelCount());
     if (!wUpdate && !errorOut)
     {
         return;
@@ -2022,8 +2023,8 @@ void Conv2DTransposeSingleChannel(MatrixDX11<T>* output,
     assert(output);
     assert(input);
     assert(kernel);
-    assert(outputChannel < output->GetDimsZ());
-    assert(kernel->GetDimsZ() == input->GetDimsZ());
+    assert(outputChannel < output->GetChannelCount());
+    assert(kernel->GetChannelCount() == input->GetChannelCount());
     DirectX11Manager::Instance()->DumpInfoQueueErrors();
 
     output->Unmap();
@@ -2095,7 +2096,7 @@ void Conv2DTransposeSingleChannel(MatrixDX11<T>* output,
     ID3D11UnorderedAccessView* uavs[] = { outUAV };
     context->CSSetUnorderedAccessViews(0u, 1u, uavs, nullptr);
 
-    const uint32_t elementCount = output->GetDimsX() * output->GetDimsY();
+    const uint32_t elementCount = output->GetWidth() * output->GetHeight() * output->GetBatchCount();
     const uint32_t threadsPerGroup = 256u;
     const uint32_t groupCount = (elementCount + threadsPerGroup - 1u) / threadsPerGroup;
     context->Dispatch(groupCount, 1u, 1u);
@@ -2133,8 +2134,8 @@ void Conv2DTransposeSingleChannelBackwards(MatrixDX11<T>* errorIn,
     assert(errorIn);
     assert(input);
     assert(kernel);
-    assert(outputChannel < errorIn->GetDimsZ());
-    assert(kernel->GetDimsZ() == input->GetDimsZ());
+    assert(outputChannel < errorIn->GetChannelCount());
+    assert(kernel->GetChannelCount() == input->GetChannelCount());
     DirectX11Manager::Instance()->DumpInfoQueueErrors();
 
     errorIn->Unmap();
@@ -2569,10 +2570,10 @@ template<class T>
 void GeluBackwards(MatrixDX11<T>* out, MatrixDX11<T>* input, MatrixDX11<T>* grad)
 {
     assert(out && input && grad);
-    assert(out->GetDimsX() == input->GetDimsX() && out->GetDimsY() == input->GetDimsY()
-           && out->GetDimsZ() == input->GetDimsZ());
-    assert(out->GetDimsX() == grad->GetDimsX() && out->GetDimsY() == grad->GetDimsY()
-           && out->GetDimsZ() == grad->GetDimsZ());
+    assert(out->GetWidth() == input->GetWidth() && out->GetHeight() == input->GetHeight()
+           && out->GetPlaneCount() == input->GetPlaneCount());
+    assert(out->GetWidth() == grad->GetWidth() && out->GetHeight() == grad->GetHeight()
+           && out->GetPlaneCount() == grad->GetPlaneCount());
     if (out->GetElementCount() == 0u) return;
     // DX11 cannot bind an input SRV and output UAV for the same resource.
     assert(out->m_dataHandles.m_bufferHandle != input->m_dataHandles.m_bufferHandle);
@@ -3086,7 +3087,7 @@ void Softmax(MatrixDX11<T>* _out, MatrixDX11<T>* _in)
     ID3D11Buffer* cbs[] = { outCBuffer, inCBuffer };
     context->CSSetConstantBuffers(0u, 2u, cbs);
 
-    const uint32_t rowCount = _out->GetDimsY() * _out->GetDimsZ();
+    const uint32_t rowCount = _out->GetHeight() * _out->GetPlaneCount();
     context->Dispatch(rowCount, 1u, 1u);
 
     ID3D11UnorderedAccessView* nullUAVs[] = { nullptr };
@@ -3161,7 +3162,7 @@ void SoftmaxBackwards(MatrixDX11<T>* _out, MatrixDX11<T>* _softmaxOut, MatrixDX1
     ID3D11Buffer* cbs[] = { outCBuffer, softCBuffer, gradCBuffer };
     context->CSSetConstantBuffers(0u, 3u, cbs);
 
-    const uint32_t rowCount = _out->GetDimsY() * _out->GetDimsZ();
+    const uint32_t rowCount = _out->GetHeight() * _out->GetPlaneCount();
     context->Dispatch(rowCount, 1u, 1u);
 
     ID3D11UnorderedAccessView* nullUAVs[] = { nullptr };
@@ -3180,11 +3181,11 @@ void AttentionScoresBackwards(MatrixDX11<T>* out, MatrixDX11<T>* probs,
                               MatrixDX11<T>* grad, MatrixDX11<T>* scale)
 {
     assert(out && probs && grad && scale);
-    assert(out->GetDimsX() == out->GetDimsY());
-    assert(out->GetDimsX() == probs->GetDimsX() && out->GetDimsY() == probs->GetDimsY()
-           && out->GetDimsZ() == probs->GetDimsZ());
-    assert(out->GetDimsX() == grad->GetDimsX() && out->GetDimsY() == grad->GetDimsY()
-           && out->GetDimsZ() == grad->GetDimsZ());
+    assert(out->GetWidth() == out->GetHeight());
+    assert(out->GetWidth() == probs->GetWidth() && out->GetHeight() == probs->GetHeight()
+           && out->GetPlaneCount() == probs->GetPlaneCount());
+    assert(out->GetWidth() == grad->GetWidth() && out->GetHeight() == grad->GetHeight()
+           && out->GetPlaneCount() == grad->GetPlaneCount());
     assert(scale->GetElementCount() == 1u);
     if (out->GetElementCount() == 0u) return;
     out->Unmap(); probs->Unmap(); grad->Unmap(); scale->Unmap();
@@ -3212,7 +3213,7 @@ void AttentionScoresBackwards(MatrixDX11<T>* out, MatrixDX11<T>* probs,
     context->CSSetShaderResources(1u, 3u, srvs);
     context->CSSetConstantBuffers(0u, 4u, cbs);
     context->CSSetUnorderedAccessViews(0u, 1u, &uav, nullptr);
-    context->Dispatch(out->GetDimsY() * out->GetDimsZ(), 1u, 1u);
+    context->Dispatch(out->GetHeight() * out->GetPlaneCount(), 1u, 1u);
     ID3D11ShaderResourceView* nullSRVs[] = {nullptr, nullptr, nullptr};
     ID3D11UnorderedAccessView* nullUAV = nullptr;
     context->CSSetUnorderedAccessViews(0u, 1u, &nullUAV, nullptr);
@@ -3222,10 +3223,148 @@ void AttentionScoresBackwards(MatrixDX11<T>* out, MatrixDX11<T>* probs,
     if (GPUSyncCalls) manager->WaitForGPU();
 }
 
+
+
+template<TransposeMode Mode = TransposeMode::None, class T>
+void MatMul_Strided(MatrixDX11<T>* _out,
+                    MatrixDX11<T>* _L,
+                    MatrixDX11<T>* _R,
+                    uint32_t L_rowStride,
+                    uint32_t L_colStride,
+                    uint32_t R_rowStride,
+                    uint32_t R_colStride,
+                    uint32_t outRowStride,
+                    uint32_t outColStride,
+                    uint32_t blockSize = 32,
+                    uint32_t numThreads = 12,
+                    ThreadPool* pool = nullptr,
+                    uint32_t L_channelStride = UINT32_MAX,
+                    uint32_t R_channelStride = UINT32_MAX,
+                    uint32_t outChannelStride = UINT32_MAX,
+                    uint32_t L_batchStride = UINT32_MAX,
+                    uint32_t R_batchStride = UINT32_MAX,
+                    uint32_t outBatchStride = UINT32_MAX)
+{
+    DirectX11Manager::Instance()->DumpInfoQueueErrors();
+    ValidateMatMulShapes<Mode>(_out,_L,_R);
+    _out->Unmap();
+    _L->Unmap();
+    _R->Unmap();
+
+    DirectX11Manager* manager = _out->m_gInstance;
+    ID3D11DeviceContext* context = manager ? manager->GetContext() : nullptr;
+    const char* shaderName = "mul_strided";
+    if constexpr (Mode == TransposeMode::Left)
+    {
+        shaderName = "mul_strided_transposeleft";
+    }
+    else if constexpr (Mode == TransposeMode::Right)
+    {
+        shaderName = "mul_strided_transposeright";
+    }
+    else if constexpr (Mode == TransposeMode::Both)
+    {
+        shaderName = "mul_strided_transposeboth";
+    }
+    else if constexpr (Mode == TransposeMode::None)
+    {
+        shaderName = "mul_strided";
+    }
+
+    ID3D11ComputeShader* shader = shaderName ? manager->GetShader(shaderName) : nullptr;
+    if (!context || !shader)
+    {
+        return;
+    }
+
+    if (!SyncCBuffer(_out) || !SyncCBuffer(_L) || !SyncCBuffer(_R))
+    {
+        return;
+    }
+
+    uint32_t oc = outChannelStride == UINT32_MAX ? (outRowStride ? outRowStride : _out->GetWidth()) * _out->GetHeight() : outChannelStride;
+    uint32_t lc = L_channelStride == UINT32_MAX ? (L_rowStride ? L_rowStride : _L->GetWidth()) * _L->GetHeight() : L_channelStride;
+    uint32_t rc = R_channelStride == UINT32_MAX ? (R_rowStride ? R_rowStride : _R->GetWidth()) * _R->GetHeight() : R_channelStride;
+    uint32_t outParams[4] = {outRowStride,outColStride,oc,outBatchStride==UINT32_MAX?oc*_out->GetChannelCount():outBatchStride};
+    uint32_t leftParams[4] = {L_rowStride,L_colStride,lc,L_batchStride==UINT32_MAX?lc*_L->GetChannelCount():L_batchStride};
+    uint32_t rightParams[4] = {R_rowStride,R_colStride,rc,R_batchStride==UINT32_MAX?rc*_R->GetChannelCount():R_batchStride};
+    if (!manager->SetCBufferOptionalParams(_out->m_dataHandles.m_cbufferHandle, outParams, 4u))
+    {
+        return;
+    }
+    if (!manager->SetCBufferOptionalParams(_L->m_dataHandles.m_cbufferHandle, leftParams, 4u))
+    {
+        return;
+    }
+    if (!manager->SetCBufferOptionalParams(_R->m_dataHandles.m_cbufferHandle, rightParams, 4u))
+    {
+        return;
+    }
+
+    ID3D11Buffer* outCBuffer = manager->GetCBuffer(_out->m_dataHandles.m_cbufferHandle);
+    ID3D11Buffer* leftCBuffer = manager->GetCBuffer(_L->m_dataHandles.m_cbufferHandle);
+    ID3D11Buffer* rightCBuffer = manager->GetCBuffer(_R->m_dataHandles.m_cbufferHandle);
+    if (!outCBuffer || !leftCBuffer || !rightCBuffer)
+    {
+        return;
+    }
+
+    ID3D11Buffer* outBuffer = manager->GetBuffer(_out->m_dataHandles.m_bufferHandle);
+    ID3D11Buffer* leftBuffer = manager->GetBuffer(_L->m_dataHandles.m_bufferHandle);
+    ID3D11Buffer* rightBuffer = manager->GetBuffer(_R->m_dataHandles.m_bufferHandle);
+    if (!outBuffer || !leftBuffer || !rightBuffer)
+    {
+        return;
+    }
+
+    ID3D11ShaderResourceView* leftSRV = manager->GetBufferSRV(_L->m_dataHandles.m_bufferHandle);
+    ID3D11ShaderResourceView* rightSRV = manager->GetBufferSRV(_R->m_dataHandles.m_bufferHandle);
+    if (!leftSRV || !rightSRV)
+    {
+        return;
+    }
+
+    ID3D11UnorderedAccessView* outUAV = manager->GetBufferUAV(_out->m_dataHandles.m_bufferHandle);
+    if (!outUAV)
+    {
+        return;
+    }
+
+    context->CSSetShader(shader, nullptr, 0u);
+    ID3D11ShaderResourceView* srvs[] = { leftSRV, rightSRV };
+    context->CSSetShaderResources(1u, 2u, srvs);
+    ID3D11UnorderedAccessView* uavs[] = { outUAV };
+    context->CSSetUnorderedAccessViews(0u, 1u, uavs, nullptr);
+    ID3D11Buffer* cbs[] = { outCBuffer, leftCBuffer, rightCBuffer };
+    context->CSSetConstantBuffers(0u, 3u, cbs);
+
+    const uint32_t elementCount = _out->GetElementCount();
+    const uint32_t threadsPerGroup = 256u;
+    const uint32_t groupCount = (elementCount + threadsPerGroup - 1u) / threadsPerGroup;
+    context->Dispatch(groupCount, 1u, 1u);
+
+    ID3D11UnorderedAccessView* nullUAVs[] = { nullptr };
+    context->CSSetUnorderedAccessViews(0u, 1u, nullUAVs, nullptr);
+    ID3D11ShaderResourceView* nullSRVs[] = { nullptr, nullptr };
+    context->CSSetShaderResources(1u, 2u, nullSRVs);
+    context->CSSetShader(nullptr, nullptr, 0u);
+    DirectX11Manager::Instance()->DumpInfoQueueErrors();
+
+    if (GPUSyncCalls)
+        DirectX11Manager::Instance()->WaitForGPU();
+}
+
 template<TransposeMode Mode = TransposeMode::None, class T>
 void Mul(MatrixDX11<T>* _out, MatrixDX11<T>* _L, MatrixDX11<T>* _R,
                       uint32_t blockSize = 32, uint32_t numThreads = 12, ThreadPool* pool = nullptr)
 {
+    ValidateMatMulShapes<Mode>(_out,_L,_R);
+    if(_out->GetPlaneCount()>1u || _L->GetPlaneCount()>1u || _R->GetPlaneCount()>1u) {
+        MatMul_Strided<Mode>(_out,_L,_R,_L->GetWidth(),1u,_R->GetWidth(),1u,
+            _out->GetWidth(),1u,blockSize,numThreads,pool);
+        return;
+    }
+
     DirectX11Manager::Instance()->DumpInfoQueueErrors();
     _out->Unmap();
     _L->Unmap();
@@ -3284,131 +3423,6 @@ void Mul(MatrixDX11<T>* _out, MatrixDX11<T>* _L, MatrixDX11<T>* _R,
     uint32_t leftCount = leftDesc.StructureByteStride ? (leftDesc.ByteWidth / leftDesc.StructureByteStride) : 0u;
     uint32_t rightCount = rightDesc.StructureByteStride ? (rightDesc.ByteWidth / rightDesc.StructureByteStride) : 0u;
     if (leftCount == 0u || rightCount == 0u)
-    {
-        return;
-    }
-
-    ID3D11ShaderResourceView* leftSRV = manager->GetBufferSRV(_L->m_dataHandles.m_bufferHandle);
-    ID3D11ShaderResourceView* rightSRV = manager->GetBufferSRV(_R->m_dataHandles.m_bufferHandle);
-    if (!leftSRV || !rightSRV)
-    {
-        return;
-    }
-
-    ID3D11UnorderedAccessView* outUAV = manager->GetBufferUAV(_out->m_dataHandles.m_bufferHandle);
-    if (!outUAV)
-    {
-        return;
-    }
-
-    context->CSSetShader(shader, nullptr, 0u);
-    ID3D11ShaderResourceView* srvs[] = { leftSRV, rightSRV };
-    context->CSSetShaderResources(1u, 2u, srvs);
-    ID3D11UnorderedAccessView* uavs[] = { outUAV };
-    context->CSSetUnorderedAccessViews(0u, 1u, uavs, nullptr);
-    ID3D11Buffer* cbs[] = { outCBuffer, leftCBuffer, rightCBuffer };
-    context->CSSetConstantBuffers(0u, 3u, cbs);
-
-    const uint32_t elementCount = _out->GetElementCount();
-    const uint32_t threadsPerGroup = 256u;
-    const uint32_t groupCount = (elementCount + threadsPerGroup - 1u) / threadsPerGroup;
-    context->Dispatch(groupCount, 1u, 1u);
-
-    ID3D11UnorderedAccessView* nullUAVs[] = { nullptr };
-    context->CSSetUnorderedAccessViews(0u, 1u, nullUAVs, nullptr);
-    ID3D11ShaderResourceView* nullSRVs[] = { nullptr, nullptr };
-    context->CSSetShaderResources(1u, 2u, nullSRVs);
-    context->CSSetShader(nullptr, nullptr, 0u);
-    DirectX11Manager::Instance()->DumpInfoQueueErrors();
-
-    if (GPUSyncCalls)
-        DirectX11Manager::Instance()->WaitForGPU();
-}
-
-template<TransposeMode Mode = TransposeMode::None, class T>
-void MatMul_Strided(MatrixDX11<T>* _out,
-                    MatrixDX11<T>* _L,
-                    MatrixDX11<T>* _R,
-                    uint32_t L_rowStride,
-                    uint32_t L_colStride,
-                    uint32_t R_rowStride,
-                    uint32_t R_colStride,
-                    uint32_t outRowStride,
-                    uint32_t outColStride,
-                    uint32_t blockSize = 32,
-                    uint32_t numThreads = 12,
-                    ThreadPool* pool = nullptr,
-                    uint32_t L_batchStride = UINT32_MAX,
-                    uint32_t R_batchStride = UINT32_MAX,
-                    uint32_t outBatchStride = UINT32_MAX)
-{
-    DirectX11Manager::Instance()->DumpInfoQueueErrors();
-    _out->Unmap();
-    _L->Unmap();
-    _R->Unmap();
-
-    DirectX11Manager* manager = _out->m_gInstance;
-    ID3D11DeviceContext* context = manager ? manager->GetContext() : nullptr;
-    const char* shaderName = "mul_strided";
-    if constexpr (Mode == TransposeMode::Left)
-    {
-        shaderName = "mul_strided_transposeleft";
-    }
-    else if constexpr (Mode == TransposeMode::Right)
-    {
-        shaderName = "mul_strided_transposeright";
-    }
-    else if constexpr (Mode == TransposeMode::Both)
-    {
-        shaderName = "mul_strided_transposeboth";
-    }
-    else if constexpr (Mode == TransposeMode::None)
-    {
-        shaderName = "mul_strided";
-    }
-
-    ID3D11ComputeShader* shader = shaderName ? manager->GetShader(shaderName) : nullptr;
-    if (!context || !shader)
-    {
-        return;
-    }
-
-    if (!SyncCBuffer(_out) || !SyncCBuffer(_L) || !SyncCBuffer(_R))
-    {
-        return;
-    }
-
-    uint32_t outParams[3] = { outRowStride, outColStride,
-        outBatchStride == UINT32_MAX ? (outRowStride ? outRowStride : _out->GetDimsX()) * _out->GetDimsY() : outBatchStride };
-    uint32_t leftParams[3] = { L_rowStride, L_colStride,
-        L_batchStride == UINT32_MAX ? (L_rowStride ? L_rowStride : _L->GetDimsX()) * _L->GetDimsY() : L_batchStride };
-    uint32_t rightParams[3] = { R_rowStride, R_colStride,
-        R_batchStride == UINT32_MAX ? (R_rowStride ? R_rowStride : _R->GetDimsX()) * _R->GetDimsY() : R_batchStride };
-    if (!manager->SetCBufferOptionalParams(_out->m_dataHandles.m_cbufferHandle, outParams, 3u))
-    {
-        return;
-    }
-    if (!manager->SetCBufferOptionalParams(_L->m_dataHandles.m_cbufferHandle, leftParams, 3u))
-    {
-        return;
-    }
-    if (!manager->SetCBufferOptionalParams(_R->m_dataHandles.m_cbufferHandle, rightParams, 3u))
-    {
-        return;
-    }
-
-    ID3D11Buffer* outCBuffer = manager->GetCBuffer(_out->m_dataHandles.m_cbufferHandle);
-    ID3D11Buffer* leftCBuffer = manager->GetCBuffer(_L->m_dataHandles.m_cbufferHandle);
-    ID3D11Buffer* rightCBuffer = manager->GetCBuffer(_R->m_dataHandles.m_cbufferHandle);
-    if (!outCBuffer || !leftCBuffer || !rightCBuffer)
-    {
-        return;
-    }
-
-    ID3D11Buffer* outBuffer = manager->GetBuffer(_out->m_dataHandles.m_bufferHandle);
-    ID3D11Buffer* leftBuffer = manager->GetBuffer(_L->m_dataHandles.m_bufferHandle);
-    ID3D11Buffer* rightBuffer = manager->GetBuffer(_R->m_dataHandles.m_bufferHandle);
-    if (!outBuffer || !leftBuffer || !rightBuffer)
     {
         return;
     }

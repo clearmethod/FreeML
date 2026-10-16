@@ -172,8 +172,8 @@ class TransformerBlockLayer : public Layer<T, Mat>
 
     virtual std::string GetInputOutputString(Datablob<T, Mat>* _blob) override
     {
-        std::string in = _blob->GetMatrix(this->GetInputName())->GetDims().GetString();
-        std::string out = _blob->GetMatrix(this->GetOutputName())->GetDims().GetString();
+        std::string in = _blob->GetMatrix(this->GetInputName())->GetShape().GetString();
+        std::string out = _blob->GetMatrix(this->GetOutputName())->GetShape().GetString();
 
         Datablob<T, Mat>* attentionData     = _blob->GetBlob("AttentionLayerData");
         Datablob<T, Mat>* layerNorm0Data    = _blob->GetBlob("LayerNorm0Data");
@@ -212,11 +212,11 @@ class TransformerBlockLayer : public Layer<T, Mat>
         const bool      useBiasDefault  = _blob->GetUInt("UseBias") > 0u;
         const float     residProjScale  = _blob->GetFloat("Init_ResidProjScale");
 
-        this->EnsureMatrix(_blob, "Output_0", input->GetDimsX(), input->GetDimsY(), input->GetDimsZ());
-        this->EnsureMatrix(_blob, "Buffer_0", input->GetDimsX(), input->GetDimsY(), input->GetDimsZ());
+        this->EnsureMatrix(_blob, "Output_0", input->GetShape());
+        this->EnsureMatrix(_blob, "Buffer_0", input->GetShape());
         if (_blob->GetUInt("TrainingEnabled") > 0u)
         {
-            this->EnsureMatrix(_blob, "ErrorOutput_0", input->GetDimsX(), input->GetDimsY(), input->GetDimsZ());
+            this->EnsureMatrix(_blob, "ErrorOutput_0", input->GetShape());
         }
 
         auto* layerNorm0Data = _blob->GetBlob("LayerNorm0Data");
@@ -258,14 +258,9 @@ class TransformerBlockLayer : public Layer<T, Mat>
         attentionData->Set("Input_0", layerNorm0Data->GetMatrix("Output_0"));
         m_attention->EnsureOutputsAllocated(attentionData);
 
-        const uint32_t dC = input->GetDimsX();
-        const uint32_t dT = input->GetDimsY();
-        const uint32_t dB = input->GetDimsZ();
-        if (dB != 1u)
-        {
-            LOG_ERROR() << "TransformerBlockLayer::Forward currently supports batch size 1 only.";
-            return;
-        }
+        const uint32_t dC = input->GetWidth();
+        const uint32_t dT = input->GetHeight();
+        const uint32_t dB = input->GetBatchCount();
         const uint32_t batchSize = dT * dB;
 
         auto* denseFCData = _blob->GetBlob("DenseFCData");
@@ -277,7 +272,7 @@ class TransformerBlockLayer : public Layer<T, Mat>
             if (denseFCData)
             {
                 if (Mat* out = denseFCData->GetMatrix("Output_0"))
-                    needResize = out->GetDimsX() != outX || out->GetDimsY() != batchSize;
+                    needResize = !denseFCData->GetMatrix("Dense_Weights") || denseFCData->GetMatrix("Dense_Weights")->GetShape()!=MatrixShape::Matrix(outX,inX);
                 else
                     needResize = true;
             }
@@ -300,7 +295,7 @@ class TransformerBlockLayer : public Layer<T, Mat>
             {
                 if (Mat* out = denseProjData->GetMatrix("Output_0"))
                 {
-                    needResize = out->GetDimsX() != outX || out->GetDimsY() != batchSize;
+                    needResize = !denseProjData->GetMatrix("Dense_Weights") || denseProjData->GetMatrix("Dense_Weights")->GetShape()!=MatrixShape::Matrix(outX,inX);
                 }
                 else
                 {
@@ -339,21 +334,22 @@ class TransformerBlockLayer : public Layer<T, Mat>
         MatrixManager<T, Mat>& inst = MatrixManager<T, Mat>::Instance();
         assert(_input);
 
-        auto output = inst.AllocateMatrix({_input->GetDimsX(), _input->GetDimsY(), _input->GetDimsZ()}, "Output_0");
+        auto output = inst.AllocateMatrix(_input->GetShape(), "Output_0");
         _blob->Set("Output_0", output);
 
-        auto buffer = inst.AllocateMatrix({_input->GetDimsX(), _input->GetDimsY(), _input->GetDimsZ()}, "Buffer_0");
+        auto buffer = inst.AllocateMatrix(_input->GetShape(), "Buffer_0");
         _blob->Set("Buffer_0", buffer);
 
         if(_blob->GetUInt("TrainingEnabled") > 0u)
         {
-            auto outputErr = inst.AllocateMatrix({_input->GetDimsX(), _input->GetDimsY(), _input->GetDimsZ()}, "ErrorOutput_0");
+            auto outputErr = inst.AllocateMatrix(_input->GetShape(), "ErrorOutput_0");
             _blob->Set("ErrorOutput_0", outputErr);
         }
     }
 
     void Forward(Datablob<T, Mat>* _blob) override
     {
+        EnsureOutputsAllocated(_blob);
         auto inputRef  = _blob->AcquireMatrix("Input_0");
         Mat* input = inputRef.get();
         auto bufferRef = _blob->AcquireMatrix("Buffer_0");
@@ -368,9 +364,9 @@ class TransformerBlockLayer : public Layer<T, Mat>
         auto* denseFCData       = _blob->GetBlob("DenseFCData");
         auto* denseProjData     = _blob->GetBlob("DenseProjData");
         auto* mlpDropoutData    = _blob->GetBlob("MLPDropoutData");
-        const uint32_t dC = input->GetDimsX();
-        const uint32_t dT = input->GetDimsY();
-        const uint32_t dB = input->GetDimsZ();
+        const uint32_t dC = input->GetWidth();
+        const uint32_t dT = input->GetHeight();
+        const uint32_t dB = input->GetBatchCount();
 
         //x = x + Attention(LN0(x))
         /////////////////////////////
@@ -419,14 +415,9 @@ class TransformerBlockLayer : public Layer<T, Mat>
         auto bufferRef = _blob->AcquireMatrix("Buffer_0");
         Mat* buffer = bufferRef.get();
         
-        const uint32_t dC = lastInput->GetDimsX();
-        const uint32_t dT = lastInput->GetDimsY();
-        const uint32_t dB = lastInput->GetDimsZ();
-        if (dB != 1u)
-        {
-            LOG_ERROR() << "TransformerBlockLayer::Backwards currently supports batch size 1 only.";
-            return;
-        }
+        const uint32_t dC = lastInput->GetWidth();
+        const uint32_t dT = lastInput->GetHeight();
+        const uint32_t dB = lastInput->GetBatchCount();
 
         m_mlpDropout->SetErrorInput(mlpDropoutData, errorRef);
         m_mlpDropout->Backwards(mlpDropoutData);

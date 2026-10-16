@@ -5,9 +5,9 @@ cbuffer MatOut_Params : register(b0)
     uint out_dimz;
     uint out_offset;
     uint out_uniqueId;
-    uint out_pad0;
-    uint out_pad1;
-    uint out_pad2;
+    uint out_channels;
+    uint out_batch;
+    uint out_reserved;
     uint4 out_optionalParams[4];
 };
 
@@ -18,9 +18,9 @@ cbuffer MatSrc_Params : register(b1)
     uint src_dimz;
     uint src_offset;
     uint src_uniqueId;
-    uint src_pad0;
-    uint src_pad1;
-    uint src_pad2;
+    uint src_channels;
+    uint src_batch;
+    uint src_reserved;
     uint4 src_optionalParams[4];
 };
 
@@ -31,9 +31,9 @@ cbuffer MatIndices_Params : register(b2)
     uint idx_dimz;
     uint idx_offset;
     uint idx_uniqueId;
-    uint idx_pad0;
-    uint idx_pad1;
-    uint idx_pad2;
+    uint idx_channels;
+    uint idx_batch;
+    uint idx_reserved;
     uint4 idx_optionalParams[4];
 };
 

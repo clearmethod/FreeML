@@ -1,11 +1,11 @@
 cbuffer OutParams : register(b0) {
     uint out_dimx, out_dimy, out_dimz, out_offset;
-    uint out_uniqueId, out_pad0, out_pad1, out_pad2;
+    uint out_uniqueId, out_channels, out_batch, out_reserved;
     uint4 out_optionalParams[4];
 };
 cbuffer InParams : register(b1) {
     uint in_dimx, in_dimy, in_dimz, in_offset;
-    uint in_uniqueId, in_pad0, in_pad1, in_pad2;
+    uint in_uniqueId, in_channels, in_batch, in_reserved;
     uint4 in_optionalParams[4];
 };
 RWStructuredBuffer<float> Out : register(u0);

@@ -16,9 +16,9 @@ cbuffer MuGrad_Params : register(b0)
     uint muGrad_dimz;
     uint muGrad_offset;
     uint muGrad_uniqueId;
-    uint muGrad_pad0;
-    uint muGrad_pad1;
-    uint muGrad_pad2;
+    uint muGrad_channels;
+    uint muGrad_batch;
+    uint muGrad_reserved;
     uint kl_weight_bits; // asfloat(kl_weight_bits) = kl_weight
     uint muGrad_opt1;
     uint muGrad_opt2;
@@ -44,9 +44,9 @@ cbuffer LvGrad_Params : register(b1)
     uint lvGrad_dimz;
     uint lvGrad_offset;
     uint lvGrad_uniqueId;
-    uint lvGrad_pad0;
-    uint lvGrad_pad1;
-    uint lvGrad_pad2;
+    uint lvGrad_channels;
+    uint lvGrad_batch;
+    uint lvGrad_reserved;
 };
 
 cbuffer DZ_Params : register(b2)
@@ -56,9 +56,9 @@ cbuffer DZ_Params : register(b2)
     uint dz_dimz;
     uint dz_offset;
     uint dz_uniqueId;
-    uint dz_pad0;
-    uint dz_pad1;
-    uint dz_pad2;
+    uint dz_channels;
+    uint dz_batch;
+    uint dz_reserved;
 };
 
 cbuffer Mu_Params : register(b3)
@@ -68,9 +68,9 @@ cbuffer Mu_Params : register(b3)
     uint mu_dimz;
     uint mu_offset;
     uint mu_uniqueId;
-    uint mu_pad0;
-    uint mu_pad1;
-    uint mu_pad2;
+    uint mu_channels;
+    uint mu_batch;
+    uint mu_reserved;
 };
 
 cbuffer LogVar_Params : register(b4)
@@ -80,9 +80,9 @@ cbuffer LogVar_Params : register(b4)
     uint lv_dimz;
     uint lv_offset;
     uint lv_uniqueId;
-    uint lv_pad0;
-    uint lv_pad1;
-    uint lv_pad2;
+    uint lv_channels;
+    uint lv_batch;
+    uint lv_reserved;
 };
 
 cbuffer Eps_Params : register(b5)
@@ -92,9 +92,9 @@ cbuffer Eps_Params : register(b5)
     uint eps_dimz;
     uint eps_offset;
     uint eps_uniqueId;
-    uint eps_pad0;
-    uint eps_pad1;
-    uint eps_pad2;
+    uint eps_channels;
+    uint eps_batch;
+    uint eps_reserved;
 };
 
 RWStructuredBuffer<float> MuGrad  : register(u0);

@@ -129,6 +129,8 @@ class DirectX11Manager
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/fill.hlsl", "fill");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/fill_scalar.hlsl", "fill_scalar");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/dropout_mask.hlsl", "dropout_mask");
+            LoadComputeShaderFromFile("GPU/DirectX11/Shaders/reduce_sum.hlsl", "reduce_sum");
+            LoadComputeShaderFromFile("GPU/DirectX11/Shaders/broadcast_binary.hlsl", "broadcast_binary");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/gradient_norm_partials.hlsl", "gradient_norm_partials");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/gradient_norm_scale.hlsl", "gradient_norm_scale");
             LoadComputeShaderFromFile("GPU/DirectX11/Shaders/softmax.hlsl", "softmax");
@@ -248,7 +250,9 @@ class DirectX11Manager
         uint32_t z;
         uint32_t offset;
         uint32_t uniqueId;
-        uint32_t pad[3];
+        uint32_t channels;
+        uint32_t batch;
+        uint32_t reserved;
         // Matches HLSL layout: uint4 optionalParams[4].
         uint32_t optionalParams[16];
     };
@@ -284,6 +288,8 @@ class DirectX11Manager
         params.z = z;
         params.offset = offset;
         params.uniqueId = uniqueId;
+        params.channels = z;
+        params.batch = 1u;
         std::memcpy(mapped.pData, &params, sizeof(params));
         m_context->Unmap(cbuffer.Get(), 0u);
 
@@ -293,7 +299,7 @@ class DirectX11Manager
         return m_cbufferHandles;
     }
 
-    bool UpdateCBuffer(int32_t handle, uint32_t x, uint32_t y, uint32_t z, uint32_t offset, uint32_t uniqueId)
+    bool UpdateCBuffer(int32_t handle, uint32_t x, uint32_t y, uint32_t z, uint32_t offset, uint32_t uniqueId, uint32_t channels = 0u, uint32_t batch = 0u)
     {
         auto it = m_cbufferMap.find(handle);
         if (it == m_cbufferMap.end())
@@ -314,11 +320,24 @@ class DirectX11Manager
         params.z = z;
         params.offset = offset;
         params.uniqueId = uniqueId;
+        params.channels = z;
+        params.batch = 1u;
         auto itParams = m_cbufferParamsMap.find(handle);
         if (itParams != m_cbufferParamsMap.end())
         {
             std::memcpy(params.optionalParams, itParams->second.optionalParams, sizeof(params.optionalParams));
+            if (itParams->second.z == z)
+            {
+                params.channels = itParams->second.channels;
+                params.batch = itParams->second.batch;
+            }
         }
+        if (channels && batch)
+        {
+            params.channels = channels;
+            params.batch = batch;
+        }
+
         std::memcpy(mapped.pData, &params, sizeof(params));
         m_context->Unmap(it->second.Get(), 0u);
         m_cbufferParamsMap[handle] = params;
@@ -348,9 +367,9 @@ class DirectX11Manager
         return handle;
     }
 
-    bool UpdateCachedCBuffer(int32_t handle, uint32_t x, uint32_t y, uint32_t z, uint32_t offset, uint32_t uniqueId)
+    bool UpdateCachedCBuffer(int32_t handle, uint32_t x, uint32_t y, uint32_t z, uint32_t offset, uint32_t uniqueId, uint32_t channels = 0u, uint32_t batch = 0u)
     {
-        return UpdateCBuffer(handle, x, y, z, offset, uniqueId);
+        return UpdateCBuffer(handle, x, y, z, offset, uniqueId, channels, batch);
     }
 
     bool ReleaseCachedCBuffer(int32_t handle)

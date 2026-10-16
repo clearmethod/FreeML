@@ -34,16 +34,16 @@ class CategoricalCrossEntropyWithLogits : public LossBase<T, MatT>
 
     virtual T Loss(MatT* target, MatT* logits) override
     {
-        const uint32_t vocab = logits->GetDimsX();
-        const uint32_t steps = logits->GetDimsY();
-        const uint32_t batch = logits->GetDimsZ();
+        const uint32_t vocab = logits->GetWidth();
+        const uint32_t steps = logits->GetHeight();
+        const uint32_t batch = logits->GetPlaneCount();
         if (vocab == 0 || steps == 0 || batch == 0) return T(0);
 
-        if (target->GetDimsX() == 1u)
+        if (target->GetWidth() == 1u)
         {
             uint32_t valid = 0u;
             T total = T(0);
-            const uint32_t targetBatch = target->GetDimsZ();
+            const uint32_t targetBatch = target->GetPlaneCount();
             for (uint32_t z = 0; z < batch; ++z)
             {
                 const uint32_t tz = targetBatch == 1u ? 0u : z;
@@ -85,7 +85,7 @@ class CategoricalCrossEntropyWithLogits : public LossBase<T, MatT>
         }
 
         T total = T(0);
-        const uint32_t targetBatch = target->GetDimsZ();
+        const uint32_t targetBatch = target->GetPlaneCount();
         for (uint32_t z = 0; z < batch; ++z)
         {
             const uint32_t tz = targetBatch == 1u ? 0u : z;
@@ -124,15 +124,15 @@ class CategoricalCrossEntropyWithLogits : public LossBase<T, MatT>
 
     virtual void Gradient(MatT* out, MatT* target, MatT* logits) override
     {
-        const uint32_t vocab = logits->GetDimsX();
-        const uint32_t steps = logits->GetDimsY();
-        const uint32_t batch = logits->GetDimsZ();
+        const uint32_t vocab = logits->GetWidth();
+        const uint32_t steps = logits->GetHeight();
+        const uint32_t batch = logits->GetPlaneCount();
         if (vocab == 0 || steps == 0 || batch == 0) return;
 
-        if (target->GetDimsX() == 1u)
+        if (target->GetWidth() == 1u)
         {
             uint32_t valid = 0u;
-            const uint32_t targetBatch = target->GetDimsZ();
+            const uint32_t targetBatch = target->GetPlaneCount();
             for (uint32_t z = 0; z < batch; ++z)
             {
                 const uint32_t tz = targetBatch == 1u ? 0u : z;
@@ -187,7 +187,7 @@ class CategoricalCrossEntropyWithLogits : public LossBase<T, MatT>
             return;
         }
 
-        const uint32_t targetBatch = target->GetDimsZ();
+        const uint32_t targetBatch = target->GetPlaneCount();
         for (uint32_t z = 0; z < batch; ++z)
         {
             const uint32_t tz = targetBatch == 1u ? 0u : z;
@@ -243,7 +243,7 @@ public:
     {
         LossBase<T,Mat>::ResetAccumulatedLoss();
         if (!m_batchLoss)
-            m_batchLoss = MatrixManager<T,Mat>::Instance().AllocateMatrix({1u,1u,1u},"CrossEntropyBatchLoss");
+            m_batchLoss = MatrixManager<T,Mat>::Instance().AllocateMatrix(MatrixShape::Matrix(1u,1u),"CrossEntropyBatchLoss");
         Fill(m_batchLoss.get(),0.0f);
     }
 
@@ -271,17 +271,17 @@ public:
     {
         if (!out || !target || !logits || !logits->GetElementCount()) return;
         ValidateTargets(target, logits);
-        assert(out->GetDimsX() == logits->GetDimsX());
-        assert(out->GetDimsY() == logits->GetDimsY());
-        assert(out->GetDimsZ() == logits->GetDimsZ());
+        assert(out->GetWidth() == logits->GetWidth());
+        assert(out->GetHeight() == logits->GetHeight());
+        assert(out->GetPlaneCount() == logits->GetPlaneCount());
         assert(out->m_dataHandles.m_bufferHandle != logits->m_dataHandles.m_bufferHandle);
         assert(out->m_dataHandles.m_bufferHandle != target->m_dataHandles.m_bufferHandle);
         if (!m_inverseCount)
-            m_inverseCount = MatrixManager<T, Mat>::Instance().AllocateMatrix({1u, 1u, 1u}, "CrossEntropyInverseCount");
-        if (target->GetDimsX() == 1u)
+            m_inverseCount = MatrixManager<T, Mat>::Instance().AllocateMatrix(MatrixShape::Matrix(1u,1u), "CrossEntropyInverseCount");
+        if (target->GetWidth() == 1u)
             Encode("cce_logits_count", m_inverseCount.get(), target, logits, 1u);
         Encode("cce_logits_grad", out, target, logits,
-               logits->GetDimsY() * logits->GetDimsZ(), m_inverseCount.get());
+               logits->GetHeight() * logits->GetPlaneCount(), m_inverseCount.get());
     }
 
 private:
@@ -294,20 +294,20 @@ private:
     {
         ValidateTargets(target, logits);
         auto& manager = MatrixManager<T, Mat>::Instance();
-        const uint32_t rows = logits->GetDimsY() * logits->GetDimsZ();
-        if (!m_rowLoss || m_rowLoss->GetDimsY() != rows)
-            m_rowLoss = manager.AllocateMatrix({2u, rows, 1u}, "CrossEntropyRows");
+        const uint32_t rows = logits->GetHeight() * logits->GetPlaneCount();
+        if (!m_rowLoss || m_rowLoss->GetHeight() != rows)
+            m_rowLoss = manager.AllocateMatrix(MatrixShape::Matrix(2u,rows), "CrossEntropyRows");
         if (!m_loss)
-            m_loss = manager.AllocateMatrix({1u, 1u, 1u}, "CrossEntropyLoss");
+            m_loss = manager.AllocateMatrix(MatrixShape::Matrix(1u,1u), "CrossEntropyLoss");
         Encode("cce_logits_loss", m_rowLoss.get(), target, logits, rows);
         Encode("cce_logits_reduce", m_loss.get(), m_rowLoss.get(), target, 1u);
     }
 
     static void ValidateTargets(Mat* target, Mat* logits)
     {
-        assert(target->GetDimsX() == 1u || target->GetDimsX() == logits->GetDimsX());
-        assert(target->GetDimsY() == logits->GetDimsY());
-        assert(target->GetDimsZ() == 1u || target->GetDimsZ() == logits->GetDimsZ());
+        assert(target->GetWidth() == 1u || target->GetWidth() == logits->GetWidth());
+        assert(target->GetHeight() == logits->GetHeight());
+        assert(target->GetPlaneCount() == 1u || target->GetPlaneCount() == logits->GetPlaneCount());
     }
 
     // Snapshot parameters into the current command buffer. No CPU mappings or waits
@@ -361,9 +361,9 @@ class  CategoricalCrossEntropyWithLogits<T, MatrixDX11<T>> : public LossBase<T, 
             return T(0);
         }
 
-        const uint32_t vocab = logits->GetDimsX();
-        const uint32_t steps = logits->GetDimsY();
-        const uint32_t batch = logits->GetDimsZ();
+        const uint32_t vocab = logits->GetWidth();
+        const uint32_t steps = logits->GetHeight();
+        const uint32_t batch = logits->GetPlaneCount();
         if (vocab == 0 || steps == 0 || batch == 0)
         {
             return T(0);
@@ -376,7 +376,7 @@ class  CategoricalCrossEntropyWithLogits<T, MatrixDX11<T>> : public LossBase<T, 
         }
 
         MatrixManager<T, MatrixDX11<T>>& inst = MatrixManager<T, MatrixDX11<T>>::Instance();
-        MatrixDX11<T>* scratch = inst.GetScratch({ 2u, rows, 1u });
+        MatrixDX11<T>* scratch = inst.GetScratch(MatrixShape::Matrix(2u,rows));
         if (!scratch)
         {
             return T(0);
@@ -438,7 +438,7 @@ class  CategoricalCrossEntropyWithLogits<T, MatrixDX11<T>> : public LossBase<T, 
         }
 
         T total = T(0);
-        if (target->GetDimsX() == 1u)
+        if (target->GetWidth() == 1u)
         {
             T valid = T(0);
             for (uint32_t row = 0; row < rows; ++row)
@@ -473,25 +473,25 @@ class  CategoricalCrossEntropyWithLogits<T, MatrixDX11<T>> : public LossBase<T, 
             return;
         }
 
-        const uint32_t vocab = logits->GetDimsX();
-        const uint32_t steps = logits->GetDimsY();
-        const uint32_t batch = logits->GetDimsZ();
+        const uint32_t vocab = logits->GetWidth();
+        const uint32_t steps = logits->GetHeight();
+        const uint32_t batch = logits->GetPlaneCount();
         if (vocab == 0 || steps == 0 || batch == 0)
         {
             return;
         }
 
-        if (out->GetDimsX() != vocab || out->GetDimsY() != steps || out->GetDimsZ() != batch)
+        if (out->GetWidth() != vocab || out->GetHeight() != steps || out->GetPlaneCount() != batch)
         {
             return;
         }
 
         T invValid = T(0);
-        if (target->GetDimsX() == 1u)
+        if (target->GetWidth() == 1u)
         {
             uint32_t valid = 0u;
-            const uint32_t targetBatch = target->GetDimsZ();
-            const uint32_t targetPlane = target->GetDimsX() * target->GetDimsY();
+            const uint32_t targetBatch = target->GetPlaneCount();
+            const uint32_t targetPlane = target->GetWidth() * target->GetHeight();
             const T* targetPtr = target->DataRead();
             if (targetPtr)
             {
@@ -530,7 +530,7 @@ class  CategoricalCrossEntropyWithLogits<T, MatrixDX11<T>> : public LossBase<T, 
             return;
         }
 
-        if (target->GetDimsX() == 1u)
+        if (target->GetWidth() == 1u)
         {
             const uint32_t optionalParams[1] = { PackFloat(invValid) };
             if (!manager->SetCBufferOptionalParams(out->m_dataHandles.m_cbufferHandle, optionalParams, 1u))

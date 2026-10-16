@@ -562,6 +562,7 @@ class SaveLoader
         // Matrix
         for (const auto& [key, value] : matdata) 
         {
+            if(key.rfind("InternalView.",0u)==0u) continue;
             Mat* mat = value.get();
             if (!mat)
             {
@@ -576,7 +577,7 @@ class SaveLoader
             ss << "DATA " << matrixDataFile << "\n";
             ss << "TYPE " << "MATRIX" << "\n";
             ss << ";\n";
-            LOG_INFO() << "Wrote: " << mat->GetID() << ":" << mat->GetName() << ": " << mat->GetDims().GetString();
+            LOG_INFO() << "Wrote: " << mat->GetID() << ":" << mat->GetName() << ": " << mat->GetShape().GetString();
         }
 
         std::string writtenfile = WriteBlobFile(ss.str());
@@ -1258,7 +1259,7 @@ class SaveLoader
     struct MatrixFile
     {
         std::string internalName;
-        Dims3D dims;
+        MatrixShape dims;
         std::string dataFile;
         uint64_t guid = 0u;
         bool hasGuid = false;
@@ -1288,9 +1289,10 @@ class SaveLoader
             }
 
             const std::string namePrefix = "INTERNAL_NAME ";
-            const std::string dimxPrefix = "DIMX ";
-            const std::string dimyPrefix = "DIMY ";
-            const std::string dimzPrefix = "DIMZ ";
+            const std::string dimxPrefix = "WIDTH ";
+            const std::string dimyPrefix = "HEIGHT ";
+            const std::string dimzPrefix = "CHANNELS ";
+            const std::string batchPrefix = "BATCH ";
             const std::string dataPrefix = "DATA ";
             const std::string guidPrefix = "GUID ";
 
@@ -1302,17 +1304,22 @@ class SaveLoader
             }
             if (line.rfind(dimxPrefix, 0) == 0)
             {
-                outFile.dims.x = static_cast<uint32_t>(std::stoul(line.substr(dimxPrefix.size())));
+                outFile.dims.width = static_cast<uint32_t>(std::stoul(line.substr(dimxPrefix.size())));
+                continue;
+            }
+            if (line.rfind(batchPrefix, 0) == 0)
+            {
+                outFile.dims.batch = static_cast<uint32_t>(std::stoul(line.substr(batchPrefix.size())));
                 continue;
             }
             if (line.rfind(dimyPrefix, 0) == 0)
             {
-                outFile.dims.y = static_cast<uint32_t>(std::stoul(line.substr(dimyPrefix.size())));
+                outFile.dims.height = static_cast<uint32_t>(std::stoul(line.substr(dimyPrefix.size())));
                 continue;
             }
             if (line.rfind(dimzPrefix, 0) == 0)
             {
-                outFile.dims.z = static_cast<uint32_t>(std::stoul(line.substr(dimzPrefix.size())));
+                outFile.dims.channels = static_cast<uint32_t>(std::stoul(line.substr(dimzPrefix.size())));
                 continue;
             }
             if (line.rfind(dataPrefix, 0) == 0)
@@ -1371,6 +1378,14 @@ class SaveLoader
             return MatrixRef();
         }
 
+        const size_t expectedBytes = mf.dims.ByteSize(sizeof(T));
+        if (raw.size() != expectedBytes)
+        {
+            LOG_WARNING() << "SaveLoader::Load: matrix data size mismatch for " << matrixFilePath.string()
+                          << " expected " << expectedBytes << " bytes, got " << raw.size();
+            return MatrixRef();
+        }
+
         auto mat = inst.AllocateMatrix(mf.dims, mf.internalName);
         if (!mat.get())
         {
@@ -1382,16 +1397,9 @@ class SaveLoader
             mat->m_guid = mf.guid;
         }
 
-        const size_t expectedBytes = static_cast<size_t>(mf.dims.x * mf.dims.y * mf.dims.z * sizeof(T));
-        const size_t copyBytes = std::min(expectedBytes, raw.size());
-        if (copyBytes > 0)
+        if (expectedBytes > 0)
         {
-            std::memcpy(mat->DataWrite(), raw.data(), copyBytes);
-        }
-        if (raw.size() != expectedBytes)
-        {
-            LOG_WARNING() << "SaveLoader::Load: matrix data size mismatch for " << matrixFilePath.string()
-                          << " expected " << expectedBytes << " bytes, got " << raw.size();
+            std::memcpy(mat->DataWrite(), raw.data(), expectedBytes);
         }
         return mat;
     }
@@ -1536,9 +1544,10 @@ class SaveLoader
         std::string datafile = WriteBinaryDataFile(_rawData.data(), _rawData.size());
         ss << "INTERNAL_NAME " << _mat->GetName() << "\n";
         ss << "GUID " << _mat->m_guid << "\n";
-        ss << "DIMX " << _mat->GetDimsX() << "\n";
-        ss << "DIMY " << _mat->GetDimsY() << "\n";
-        ss << "DIMZ " << _mat->GetDimsZ() << "\n";
+        ss << "WIDTH " << _mat->GetWidth() << "\n";
+        ss << "HEIGHT " << _mat->GetHeight() << "\n";
+        ss << "CHANNELS " << _mat->GetChannelCount() << "\n";
+        ss << "BATCH " << _mat->GetBatchCount() << "\n";
         ss << "DATA " << datafile << "\n";
         ss << ";\n";
         out.write(ss.str().c_str(), static_cast<std::streamsize>(ss.str().length()));

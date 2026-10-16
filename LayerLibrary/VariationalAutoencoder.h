@@ -51,7 +51,7 @@ Datablob<T, Mat>* InitVariationalAutoencoderBlob(std::vector<ConvSettings>& _con
     auto* muLayer = new Conv2D<T, Identity<T>, Mat>();
     auto* muBlob = InitConv2DBlob<T, Mat>(hiddenChannels,
                                           latentChannels,
-                                          Dims3D(1u, 1u, 1u),
+                                          MatrixShape::Matrix(1u,1u),
                                           1u,
                                           1u,
                                           0u,
@@ -65,7 +65,7 @@ Datablob<T, Mat>* InitVariationalAutoencoderBlob(std::vector<ConvSettings>& _con
     auto* logVarLayer = new Conv2D<T, Identity<T>, Mat>();
     auto* logVarBlob = InitConv2DBlob<T, Mat>(hiddenChannels,
                                               latentChannels,
-                                              Dims3D(1u, 1u, 1u),
+                                              MatrixShape::Matrix(1u,1u),
                                               1u,
                                               1u,
                                               0u,
@@ -182,14 +182,14 @@ public:
         _blob->Set("Output_2_LogVar", logVarRef);
 
         // Reparameterization buffers: Output_0_Latent is the sampled z, not mu.
-        this->EnsureMatrix(_blob, "Output_0_Latent", muRef->GetDimsX(), muRef->GetDimsY(), muRef->GetDimsZ());
-        this->EnsureMatrix(_blob, "Eps",             muRef->GetDimsX(), muRef->GetDimsY(), muRef->GetDimsZ());
+        this->EnsureMatrix(_blob, "Output_0_Latent", muRef->GetShape());
+        this->EnsureMatrix(_blob, "Eps",             muRef->GetShape());
         // Gradient buffers for the two separate head backward passes.
-        this->EnsureMatrix(_blob, "MuGrad",          muRef->GetDimsX(), muRef->GetDimsY(), muRef->GetDimsZ());
-        this->EnsureMatrix(_blob, "LogVarGrad",      muRef->GetDimsX(), muRef->GetDimsY(), muRef->GetDimsZ());
-        this->EnsureMatrix(_blob, "HiddenGrad",      nextInput->GetDimsX(), nextInput->GetDimsY(), nextInput->GetDimsZ());
+        this->EnsureMatrix(_blob, "MuGrad",          muRef->GetShape());
+        this->EnsureMatrix(_blob, "LogVarGrad",      muRef->GetShape());
+        this->EnsureMatrix(_blob, "HiddenGrad",      nextInput->GetShape());
 
-        this->EnsureMatrix(_blob, "ErrorOutput_0", input->GetDimsX(), input->GetDimsY(), input->GetDimsZ());
+        this->EnsureMatrix(_blob, "ErrorOutput_0", input->GetShape());
     }
 
     void Forward(Datablob<T, Mat>* _blob) override

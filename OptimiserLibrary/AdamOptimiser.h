@@ -130,8 +130,8 @@ public:
         {
             MatrixManager<T, Mat>& inst = MatrixManager<T, Mat>::Instance();
 
-            m_momentzero[key] = inst.AllocateMatrix(param->GetDims(), "adam_m");
-            m_momentone[key] = inst.AllocateMatrix(param->GetDims(), "adam_v");
+            m_momentzero[key] = inst.AllocateMatrix(param->GetShape(), "adam_m");
+            m_momentone[key] = inst.AllocateMatrix(param->GetShape(), "adam_v");
             Fill(m_momentzero[key].get(), 0);   // first moment initialised to zero
             Fill(m_momentone[key].get(), 0);  // second moment initialised to zero
             m_timestep[key] = 0;       // timestep starts at zero

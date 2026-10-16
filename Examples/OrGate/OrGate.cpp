@@ -40,22 +40,22 @@ int main()
 
     // 2xBatchsize matrix.
     // We set all 4 combinations of inputs
-    auto newInput0 = inst.AllocateMatrix( {2,batchSize}, "Input");
+    auto newInput0 = inst.AllocateMatrix( MatrixShape::Matrix(2,batchSize), "Input");
     newInput0.get()->SetValue(0, 0, 0.0); // 0, 0
     newInput0.get()->SetValue(1, 0, 0.0);
     inputs.push_back(newInput0);
 
-    auto newInput1 = inst.AllocateMatrix( {2,batchSize}, "Input");
+    auto newInput1 = inst.AllocateMatrix( MatrixShape::Matrix(2,batchSize), "Input");
     newInput1.get()->SetValue(0, 0, 1.0); // 1, 0
     newInput1.get()->SetValue(1, 0, 0.0);
     inputs.push_back(newInput1);
 
-    auto newInput2 = inst.AllocateMatrix( {2,batchSize}, "Input");
+    auto newInput2 = inst.AllocateMatrix( MatrixShape::Matrix(2,batchSize), "Input");
     newInput2.get()->SetValue(0, 0, 0.0); // 0, 1
     newInput2.get()->SetValue(1, 0, 1.0);
     inputs.push_back(newInput2);
 
-    auto newInput3 = inst.AllocateMatrix( {2,batchSize}, "Input");
+    auto newInput3 = inst.AllocateMatrix( MatrixShape::Matrix(2,batchSize), "Input");
     newInput3.get()->SetValue(0, 0, 1.0); // 1, 1
     newInput3.get()->SetValue(1, 0, 1.0);
     // Add to the array of inputs (Note: we have only one input in this demo)
@@ -66,7 +66,7 @@ int main()
     uint32_t counter = 0u;
     for (auto& v : inputs)
     {
-        auto newOutput = inst.AllocateMatrix( {2,batchSize}, "TargetOutput_" + std::to_string(counter));
+        auto newOutput = inst.AllocateMatrix( MatrixShape::Matrix(2,batchSize), "TargetOutput_" + std::to_string(counter));
         counter++;
         Fill(newOutput.get(), 0.0f);
         for (uint32_t j = 0; j < batchSize; j++)
@@ -92,7 +92,7 @@ int main()
     // Create Layers and Model
     //////////////////////////
     // One Dense layer with two inputs and two outputs.
-    const uint32_t outputsize = outputs[0]->GetDimsX();
+    const uint32_t outputsize = outputs[0]->GetWidth();
     using actFunction = Tanh<T>;
 
     // Dense layer with no bias.

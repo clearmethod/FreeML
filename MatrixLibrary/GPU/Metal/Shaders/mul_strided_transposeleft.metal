@@ -8,9 +8,9 @@ struct MatrixParams
     uint dimz;
     uint offset;
     uint uniqueId;
-    uint pad0;
-    uint pad1;
-    uint pad2;
+    uint channels;
+    uint batch;
+    uint reserved;
     uint optionalParams[16];
 };
 
@@ -47,9 +47,9 @@ kernel void mul_strided_transposeleft(device float* out [[buffer(0)]],
     if (rightRowStride == 0u) rightRowStride = rightParams.dimx;
     if (rightColStride == 0u) rightColStride = 1u;
 
-    const uint outBase = outParams.offset + outZ * outParams.optionalParams[2];
-    const uint leftBase = leftParams.offset + outZ * leftParams.optionalParams[2];
-    const uint rightBase = rightParams.offset + outZ * rightParams.optionalParams[2];
+    const uint outBase = outParams.offset + (outParams.batch == 1u ? 0u : outZ / outParams.channels) * outParams.optionalParams[3] + (outParams.channels == 1u ? 0u : outZ % outParams.channels) * outParams.optionalParams[2];
+    const uint leftBase = leftParams.offset + (leftParams.batch == 1u ? 0u : outZ / outParams.channels) * leftParams.optionalParams[3] + (leftParams.channels == 1u ? 0u : outZ % outParams.channels) * leftParams.optionalParams[2];
+    const uint rightBase = rightParams.offset + (rightParams.batch == 1u ? 0u : outZ / outParams.channels) * rightParams.optionalParams[3] + (rightParams.channels == 1u ? 0u : outZ % outParams.channels) * rightParams.optionalParams[2];
 
     float sum = 0.0f;
     for (uint k = 0; k < leftParams.dimy; ++k)

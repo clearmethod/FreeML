@@ -37,22 +37,22 @@ int main()
 
     // 2xBatchsize matrix.
     // We set all 4 combinations of inputs
-    auto newInput0 = inst.AllocateMatrix({2, 1}, "Input");
+    auto newInput0 = inst.AllocateMatrix(MatrixShape::Matrix(2,1), "Input");
     newInput0->SetValue(0, 0, 0.0); // 0, 0
     newInput0->SetValue(1, 0, 0.0);
     inputsUnbatched.push_back(newInput0);
 
-    auto newInput1 = inst.AllocateMatrix({2, 1}, "Input");
+    auto newInput1 = inst.AllocateMatrix(MatrixShape::Matrix(2,1), "Input");
     newInput1->SetValue(0, 0, 1.0); // 1, 0
     newInput1->SetValue(1, 0, 0.0);
     inputsUnbatched.push_back(newInput1);
 
-    auto newInput2 = inst.AllocateMatrix({2, 1}, "Input");
+    auto newInput2 = inst.AllocateMatrix(MatrixShape::Matrix(2,1), "Input");
     newInput2->SetValue(0, 0, 0.0); // 0, 1
     newInput2->SetValue(1, 0, 1.0);
     inputsUnbatched.push_back(newInput2);
 
-    auto newInput3 = inst.AllocateMatrix({2, 1}, "Input");
+    auto newInput3 = inst.AllocateMatrix(MatrixShape::Matrix(2,1), "Input");
     newInput3->SetValue(0, 0, 1.0); // 1, 1
     newInput3->SetValue(1, 0, 1.0);
     // Add to the array of inputs (Note: we have only one input in this demo)
@@ -62,7 +62,7 @@ int main()
 
     for(uint32_t i =0; i <= inputsUnbatched.size() - batchSize; i+=batchSize)
     {
-        auto batch = inst.AllocateMatrix({2, batchSize}, "InputBatch");
+        auto batch = inst.AllocateMatrix(MatrixShape::Matrix(2,batchSize), "InputBatch");
         std::vector<MatType*> mats;
         for(uint32_t j = 0; j < batchSize; j++)
         {
@@ -77,7 +77,7 @@ int main()
     uint32_t counter = 0u;
     for (auto& v : inputsUnbatched)
     {
-        auto newOutput = inst.AllocateMatrix({2, 1}, "TargetOutput_" + std::to_string(counter));
+        auto newOutput = inst.AllocateMatrix(MatrixShape::Matrix(2,1), "TargetOutput_" + std::to_string(counter));
         counter++;
         Fill(newOutput.get(), 0.0f);
         if (v->GetValue(0, 0) == 1.0 || v->GetValue(1, 0) == 1.0)
@@ -96,7 +96,7 @@ int main()
     std::vector<MatrixRef> outputs;
     for(uint32_t i =0; i <= outputsUnbatched.size() - batchSize; i+=batchSize)
     {
-        auto batch = inst.AllocateMatrix({2, batchSize}, "InputBatch");
+        auto batch = inst.AllocateMatrix(MatrixShape::Matrix(2,batchSize), "InputBatch");
         std::vector<MatType*> mats;
         for(uint32_t j = 0; j < batchSize; j++)
         {
@@ -113,7 +113,7 @@ int main()
     // Create Layers and Model
     //////////////////////////
     // One Dense layer with two inputs and two outputs.
-    const uint32_t outputsize = outputs[0].get()->GetDimsX();
+    const uint32_t outputsize = outputs[0].get()->GetWidth();
     using actFunction = Tanh<T>;
 
     // Dense layer with no bias.
@@ -127,7 +127,7 @@ int main()
     m.AddLayer(layer0, denseData0);
     m.SetFinalOutputLayer(layer0);
     m.SetOptimiser(&adamopt);
-    m.SetExpectedInputDims(inputs[0].get()->GetDims());
+    m.SetExpectedInputDims(inputs[0].get()->GetShape());
     m.Init();
 
     // Log Starting State

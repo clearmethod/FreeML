@@ -175,6 +175,11 @@ class MetalManager
             LoadComputeShaderFromFile("GPU/Metal/Shaders/gradient_norm.metal", "gradient_norm_scale");
             LoadComputeShaderFromFile("GPU/Metal/Shaders/sum_columns.metal", "sum_columns");
             LoadComputeShaderFromFile("GPU/Metal/Shaders/sum_columns_parallel.metal", "sum_columns_parallel");
+            LoadComputeShaderFromFile("GPU/Metal/Shaders/reduce_sum.metal", "reduce_sum");
+            LoadComputeShaderFromFile("GPU/Metal/Shaders/broadcast_binary.metal", "broadcast_binary");
+            LoadComputeShaderFromFile("GPU/Metal/Shaders/convolution.metal", "convolution_forward");
+            LoadComputeShaderFromFile("GPU/Metal/Shaders/convolution.metal", "convolution_weights_backwards");
+            LoadComputeShaderFromFile("GPU/Metal/Shaders/convolution.metal", "convolution_input_backwards");
             LoadComputeShaderFromFile("GPU/Metal/Shaders/gelu.metal", "gelu");
             LoadComputeShaderFromFile("GPU/Metal/Shaders/gelu_inplace.metal", "gelu_inplace");
             LoadComputeShaderFromFile("GPU/Metal/Shaders/gelu_derivative.metal", "gelu_derivative");
@@ -270,7 +275,9 @@ class MetalManager
         uint32_t z;
         uint32_t offset;
         uint32_t uniqueId;
-        uint32_t pad[3];
+        uint32_t channels;
+        uint32_t batch;
+        uint32_t reserved;
         // Matches HLSL layout: uint4 optionalParams[4].
         uint32_t optionalParams[16];
     };
@@ -289,6 +296,8 @@ class MetalManager
         params.z = z;
         params.offset = offset;
         params.uniqueId = uniqueId;
+        params.channels = z;
+        params.batch = 1u;
 
         Obj cbuffer = Send<Obj>(
             m_device,
@@ -307,7 +316,7 @@ class MetalManager
         return m_cbufferHandles;
     }
 
-    bool UpdateCBuffer(int32_t handle, uint32_t x, uint32_t y, uint32_t z, uint32_t offset, uint32_t uniqueId)
+    bool UpdateCBuffer(int32_t handle, uint32_t x, uint32_t y, uint32_t z, uint32_t offset, uint32_t uniqueId, uint32_t channels = 0u, uint32_t batch = 0u)
     {
         auto it = m_cbufferMap.find(handle);
         if (it == m_cbufferMap.end())
@@ -327,11 +336,24 @@ class MetalManager
         params.z = z;
         params.offset = offset;
         params.uniqueId = uniqueId;
+        params.channels = z;
+        params.batch = 1u;
 
         auto itParams = m_cbufferParamsMap.find(handle);
         if (itParams != m_cbufferParamsMap.end())
         {
             std::memcpy(params.optionalParams, itParams->second.optionalParams, sizeof(params.optionalParams));
+            if (itParams->second.z == z)
+            {
+                params.channels = itParams->second.channels;
+                params.batch = itParams->second.batch;
+            }
+        }
+
+        if (channels && batch)
+        {
+            params.channels = channels;
+            params.batch = batch;
         }
 
         std::memcpy(ptr, &params, sizeof(params));
@@ -362,9 +384,9 @@ class MetalManager
         return handle;
     }
 
-    bool UpdateCachedCBuffer(int32_t handle, uint32_t x, uint32_t y, uint32_t z, uint32_t offset, uint32_t uniqueId)
+    bool UpdateCachedCBuffer(int32_t handle, uint32_t x, uint32_t y, uint32_t z, uint32_t offset, uint32_t uniqueId, uint32_t channels = 0u, uint32_t batch = 0u)
     {
-        return UpdateCBuffer(handle, x, y, z, offset, uniqueId);
+        return UpdateCBuffer(handle, x, y, z, offset, uniqueId, channels, batch);
     }
 
     bool ReleaseCachedCBuffer(int32_t handle)

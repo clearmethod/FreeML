@@ -89,8 +89,8 @@ public:
     {
         auto* inMat = _blob->GetMatrix(GetInputName());
         auto* outMat = _blob->GetMatrix(GetOutputName());
-        std::string in = inMat ? inMat->GetDims().GetString() : "TBD";
-        std::string out = outMat ? outMat->GetDims().GetString() : "TBD";
+        std::string in = inMat ? inMat->GetShape().GetString() : "TBD";
+        std::string out = outMat ? outMat->GetShape().GetString() : "TBD";
         return GetName() + ": " + in + " -> " + out;
     }
 
@@ -201,18 +201,32 @@ public:
     {
     }
 
+    MatrixRef CachedView(Datablob<T,Mat>* blob,const std::string& name,const MatrixRef& parent,
+                         const MatrixShape& shape)
+    {
+        const auto key="InternalView."+name;
+        auto view=blob->AcquireMatrix(key);
+        const bool created=!view;
+        MatrixManager<T,Mat>::Instance().UpdateView(view,parent,shape);
+        if(created) blob->Set(key,view);
+        return view;
+    }
+
     void EnsureMatrix(Datablob<T, Mat>* _blob, const char* _key, uint32_t _dimsX, uint32_t _dimsY = 1, uint32_t _dimsZ = 1)
+    { EnsureMatrix(_blob, _key, MatrixShape::Image(1u,_dimsZ,_dimsX,_dimsY)); }
+
+    void EnsureMatrix(Datablob<T, Mat>* _blob, const char* _key, const MatrixShape& shape)
     {
         auto matRef = _blob->AcquireMatrix(_key);
         Mat* mat = matRef.get();
-        if (!mat || mat->GetDimsX() != _dimsX || mat->GetDimsY() != _dimsY || mat->GetDimsZ() != _dimsZ)
+        if (!mat || mat->GetShape() != shape)
         {
             MatrixManager<T, Mat>& inst = MatrixManager<T, Mat>::Instance();
             if (mat)
             {
                 inst.RemoveMatrix(mat);
             }
-            auto newRef = inst.AllocateMatrix({_dimsX, _dimsY, _dimsZ}, _key);
+            auto newRef = inst.AllocateMatrix(shape, _key);
             _blob->Set(_key, newRef);
         }
     }

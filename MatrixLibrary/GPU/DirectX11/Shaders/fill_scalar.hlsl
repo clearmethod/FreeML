@@ -8,9 +8,9 @@ cbuffer MatOut_Params : register(b0)
     uint out_dimz;
     uint out_offset;
     uint out_uniqueId;
-    uint out_pad0;
-    uint out_pad1;
-    uint out_pad2;
+    uint out_channels;
+    uint out_batch;
+    uint out_reserved;
     uint out_opt0; // asfloat(out_opt0) = fill value
     uint out_opt1;
     uint out_opt2;

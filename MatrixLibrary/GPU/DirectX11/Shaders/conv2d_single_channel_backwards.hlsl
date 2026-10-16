@@ -5,9 +5,9 @@ cbuffer MatErrorIn_Params : register(b0)
     uint error_dimz;
     uint error_offset;
     uint error_uniqueId;
-    uint error_pad0;
-    uint error_pad1;
-    uint error_pad2;
+    uint error_channels;
+    uint error_batch;
+    uint error_reserved;
     uint4 error_optionalParams[4];
 };
 
@@ -18,9 +18,9 @@ cbuffer MatInput_Params : register(b1)
     uint input_dimz;
     uint input_offset;
     uint input_uniqueId;
-    uint input_pad0;
-    uint input_pad1;
-    uint input_pad2;
+    uint input_channels;
+    uint input_batch;
+    uint input_reserved;
 };
 
 cbuffer MatKernel_Params : register(b2)
@@ -30,9 +30,9 @@ cbuffer MatKernel_Params : register(b2)
     uint kernel_dimz;
     uint kernel_offset;
     uint kernel_uniqueId;
-    uint kernel_pad0;
-    uint kernel_pad1;
-    uint kernel_pad2;
+    uint kernel_channels;
+    uint kernel_batch;
+    uint kernel_reserved;
 };
 
 cbuffer MatWUpdate_Params : register(b3)
@@ -42,9 +42,9 @@ cbuffer MatWUpdate_Params : register(b3)
     uint wupdate_dimz;
     uint wupdate_offset;
     uint wupdate_uniqueId;
-    uint wupdate_pad0;
-    uint wupdate_pad1;
-    uint wupdate_pad2;
+    uint wupdate_channels;
+    uint wupdate_batch;
+    uint wupdate_reserved;
 };
 
 cbuffer MatErrorOut_Params : register(b4)
@@ -54,9 +54,9 @@ cbuffer MatErrorOut_Params : register(b4)
     uint errorout_dimz;
     uint errorout_offset;
     uint errorout_uniqueId;
-    uint errorout_pad0;
-    uint errorout_pad1;
-    uint errorout_pad2;
+    uint errorout_channels;
+    uint errorout_batch;
+    uint errorout_reserved;
 };
 
 StructuredBuffer<float> MatErrorIn : register(t1);

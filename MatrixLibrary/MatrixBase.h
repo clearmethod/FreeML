@@ -2,33 +2,14 @@
 #pragma once
 
 #include <ToolsLibrary/Tools.h>
+#include "MatrixShape.h"
 
 #include <cstdint>
 #include <string>
 #include <vector>
 #include <sstream>
 #include <iomanip>
-
-struct Dims3D
-{
-    Dims3D() = default;
-    Dims3D(uint32_t _x, uint32_t _y = 1u, uint32_t _z = 1u) : x(_x), y(_y), z(_z){}
-    Dims3D(const Dims3D& _other) = default;
-    Dims3D(Dims3D&& _other) noexcept = default;
-    Dims3D& operator=(const Dims3D& _other) = default;
-    Dims3D& operator=(Dims3D&& _other) noexcept = default;
-    uint32_t x = 0u;
-    uint32_t y = 0u;
-    uint32_t z = 0u;
-
-    std::string GetString() const
-    {
-        return "(" + std::to_string(x) + ", " 
-                   + (y != 1 ? std::to_string(y) : "") 
-                   + (z != 1 ? ", " + std::to_string(z) : "")
-                   + ")";
-    }
-};
+#include <memory>
 
 template<typename T>
 class MatrixBase 
@@ -38,6 +19,8 @@ public:
     {
         m_guid = m_guid = GenerateGuidUINT();
     }
+    MatrixBase(MatrixBase&&) noexcept = default;
+    MatrixBase& operator=(MatrixBase&&) noexcept = default;
     virtual                ~MatrixBase  () = default;
     virtual T*              DataWrite   () = 0;
     virtual const T*        DataRead    () = 0;
@@ -54,6 +37,7 @@ public:
 
     virtual bool            AllocateMemory  (uint32_t _elementCount) = 0;
     virtual void            FreeMemory      () {}
+    virtual uint64_t        GetOwnedBytes() const { return 0u; }
 
     virtual T               GetValue        (std::uint32_t x, std::uint32_t y)        = 0;
     virtual T               GetValue        (uint32_t _x, uint32_t _y, uint32_t _z)   = 0;
@@ -68,38 +52,43 @@ public:
 
     virtual void GetRawData(std::vector<char>& _out) = 0;
 
-    virtual void GetSliceX(MatrixBase<T>* _matrixOut, uint32_t _zIndex) {};
-    virtual void GetSliceY(MatrixBase<T>* _matrixOut, uint32_t _zIndex) {};
-    virtual void GetSliceZ(MatrixBase<T>* _matrixOut, uint32_t _zIndex) {};
+    // Borrowed temporary plane; managed views use MatrixManager to retain storage.
+    virtual void GetPlaneView(MatrixBase<T>* _matrixOut, uint32_t _zIndex) {};
 
-    virtual uint32_t GetDimsX() const
+    const MatrixShape& GetShape() const { return m_dims; }
+    uint32_t GetBatchCount() const { return m_dims.batch; }
+    uint32_t GetChannelCount() const { return m_dims.channels; }
+    // Managed views retain the parent matrix without taking ownership of its buffer.
+    void RetainViewParent(std::shared_ptr<void> parent,MatrixBase<T>* matrix)
+    { m_viewParent=std::move(parent);m_viewParentMatrix=matrix; }
+    MatrixBase<T>* GetViewParent() const { return m_viewParentMatrix; }
+    virtual void BindView(MatrixBase<T>* parent,const MatrixShape& shape,uint32_t relativeOffset)
     {
-        return m_dims.x;
+        SetData(parent->GetData(),parent->GetOffset()+relativeOffset);
+        SetShape(shape);
     }
 
-    virtual uint32_t GetDimsY() const
+    T GetValue(uint32_t b, uint32_t c, uint32_t x, uint32_t y)
+    { return DataRead()[m_dims.Index(b,c,x,y)]; }
+    void SetValue(uint32_t b, uint32_t c, uint32_t x, uint32_t y, T value)
+    { DataWrite()[m_dims.Index(b,c,x,y)] = value; }
+
+    virtual uint32_t GetWidth() const
     {
-        return m_dims.y;
+        return m_dims.width;
     }
 
-    virtual uint32_t GetDimsZ() const
+    virtual uint32_t GetHeight() const
     {
-        return m_dims.z;
+        return m_dims.height;
     }
 
-    virtual Dims3D& GetDims()
+    virtual uint32_t GetPlaneCount() const
     {
-        return m_dims;
+        return MatrixShape::Matrix(m_dims.channels, m_dims.batch).CheckedElementCount();
     }
 
-    virtual void SetDims(uint32_t _x, uint32_t _y = 1u, uint32_t _z = 1u)
-    {
-        MatrixBase<T>::m_dims.x = _x;
-        MatrixBase<T>::m_dims.y = _y;
-        MatrixBase<T>::m_dims.z = _z;
-    }
-
-    virtual void SetDims(Dims3D _dims)
+    virtual void SetShape(MatrixShape _dims)
     {
         MatrixBase<T>::m_dims = _dims;
     }
@@ -111,7 +100,7 @@ public:
     virtual std::string Description()
     {
         std::stringstream ss;
-        ss << typeid(T).name() << "(" << GetDimsX() << ", " << GetDimsY() << ")";
+        ss << typeid(T).name() << "(" << GetWidth() << ", " << GetHeight() << ")";
         return ss.str();
     }
 
@@ -130,15 +119,15 @@ public:
         ss << "Name: " << m_name << "\n";
         ss << "Dims: " << m_dims.GetString() << "\n";
         int county = 0;
-        for(uint32_t y = 0u; y < m_dims.y; y++)
+        for(uint32_t y = 0u; y < m_dims.height; y++)
         {
             county++;
             ss << "[ ";
-            for(uint32_t x = 0u; x < m_dims.x; x++)
+            for(uint32_t x = 0u; x < m_dims.width; x++)
             {
                 ss << std::fixed << std::setprecision(3) << GetValue(x,y);
 
-                if(x != m_dims.x - 1)
+                if(x != m_dims.width - 1)
                     ss << ",";
                 
             }
@@ -154,7 +143,11 @@ public:
 
     std::string m_name           = "";
     std::string m_hardwareName   = "";
-    Dims3D      m_dims           = Dims3D(0u, 0u);
+    MatrixShape      m_dims           = MatrixShape::Matrix(0u,0u);
     uint64_t    m_guid           = 0u;
+
+private:
+    std::shared_ptr<void> m_viewParent;
+    MatrixBase<T>* m_viewParentMatrix=nullptr;
 
 };

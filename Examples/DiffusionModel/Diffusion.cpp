@@ -97,7 +97,7 @@ static std::unique_ptr<Model<T, MatType>> BuildOrLoadVAE( const DiffusionConfig&
     {
         // Encoder
         std::vector<ConvSettings> encStages = {
-                                                {cfg.image_ch, cfg.vae_hidden, Dims3D(3u, 3u, 1u), 2u, 1u, 1u, true}
+                                                {cfg.image_ch, cfg.vae_hidden, MatrixShape::Matrix(3u,3u), 2u, 1u, 1u, true}
                                               };
         auto* enc = new VariationalAutoencoder<T, Relu<T>, MatType>();
         enc->SetName("vae_enc");
@@ -106,8 +106,8 @@ static std::unique_ptr<Model<T, MatType>> BuildOrLoadVAE( const DiffusionConfig&
 
         // Decoder
         std::vector<ConvTransposeSettings> decStages = {
-                                                        {cfg.latent_ch,  cfg.vae_hidden, Dims3D(3u, 3u, 1u), 2u, 1u, 1u, 1u, true},
-                                                        {cfg.vae_hidden, cfg.image_ch,   Dims3D(3u, 3u, 1u), 1u, 1u, 0u, 1u, true}
+                                                        {cfg.latent_ch,  cfg.vae_hidden, MatrixShape::Matrix(3u,3u), 2u, 1u, 1u, 1u, true},
+                                                        {cfg.vae_hidden, cfg.image_ch,   MatrixShape::Matrix(3u,3u), 1u, 1u, 0u, 1u, true}
                                                        };
         auto* dec     = new VariationalAutoencoder_Decode<T, Identity<T>, MatType>();
         dec->SetName("vae_dec");
@@ -116,7 +116,7 @@ static std::unique_ptr<Model<T, MatType>> BuildOrLoadVAE( const DiffusionConfig&
         model->AddDependency(dec, 0, enc, 0);
 
         model->SetFinalOutputLayer(dec);
-        model->SetExpectedInputDims({cfg.image_size, cfg.image_size, cfg.image_ch});
+        model->SetExpectedInputDims(MatrixShape::Image(1u,cfg.image_ch,cfg.image_size,cfg.image_size));
         model->SetName(cfg.vae_name);
         model->SetOptimiser(new AdamWOptimiser<T, MatType>(cfg.lr, 0.9f, 0.999f, 1e-8f, 1e-4f));
         model->SetLoss(new MeanSquaredError<T, MatType>());
@@ -140,13 +140,13 @@ static std::unique_ptr<Model<T, MatType>> BuildOrLoadDenoiser( const DiffusionCo
     if (!model->Load(cfg.denoiser_name))
     {
         std::vector<ConvSettings> encStages =   {
-                                                 {in_ch,         cfg.latent_ch, Dims3D(3u, 3u, 1u), 1u, 1u, 1u, true, "relu"},
-                                                 {cfg.latent_ch, C * 4,         Dims3D(3u, 3u, 1u), 2u, 1u, 1u, true, "relu"},
-                                                 {C * 4,         C * 8,         Dims3D(3u, 3u, 1u), 2u, 1u, 1u, true, "relu"},
+                                                 {in_ch,         cfg.latent_ch, MatrixShape::Matrix(3u,3u), 1u, 1u, 1u, true, "relu"},
+                                                 {cfg.latent_ch, C * 4,         MatrixShape::Matrix(3u,3u), 2u, 1u, 1u, true, "relu"},
+                                                 {C * 4,         C * 8,         MatrixShape::Matrix(3u,3u), 2u, 1u, 1u, true, "relu"},
                                                 };
         std::vector<ConvTransposeSettings> decStages = {
-                                                        {C * 8, C * 4,         Dims3D(3u, 3u, 1u), 2u, 1u, 1u, 1u, true, "relu"},
-                                                        {C * 4, cfg.latent_ch, Dims3D(3u, 3u, 1u), 2u, 1u, 1u, 1u, true, "identity"},
+                                                        {C * 8, C * 4,         MatrixShape::Matrix(3u,3u), 2u, 1u, 1u, 1u, true, "relu"},
+                                                        {C * 4, cfg.latent_ch, MatrixShape::Matrix(3u,3u), 2u, 1u, 1u, 1u, true, "identity"},
                                                        };
         auto* unet = new UNet<T, Identity<T>, MatType>();
         unet->SetName("unet");
@@ -154,7 +154,7 @@ static std::unique_ptr<Model<T, MatType>> BuildOrLoadDenoiser( const DiffusionCo
         model->AddLayer(unet, blob);
 
         model->SetFinalOutputLayer(unet);
-        model->SetExpectedInputDims({cfg.latent_size, cfg.latent_size, in_ch});
+        model->SetExpectedInputDims(MatrixShape::Image(1u,in_ch,cfg.latent_size,cfg.latent_size));
         model->SetName(cfg.denoiser_name);
         model->SetOptimiser(new AdamWOptimiser<T, MatType>(cfg.lr, 0.9f, 0.999f, 1e-8f, 1e-4f));
         model->SetLoss(new MeanSquaredError<T, MatType>());
@@ -187,13 +187,13 @@ static TrainingBuffers AllocateTrainingBuffers(const DiffusionConfig& cfg,
                                                MatrixManager<T, MatType>& inst)
 {
     TrainingBuffers buf;
-    buf.image    = inst.AllocateMatrix({cfg.image_size,  cfg.image_size,  cfg.image_ch},           "tr_image");
-    buf.latent   = inst.AllocateMatrix({cfg.latent_size, cfg.latent_size, cfg.latent_ch},          "tr_latent");
-    buf.eps      = inst.AllocateMatrix({cfg.latent_size, cfg.latent_size, cfg.latent_ch},          "tr_eps");
-    buf.noiseBank= inst.AllocateMatrix({cfg.latent_size, cfg.latent_size, cfg.latent_ch * 512u},   "tr_noise_bank");
-    buf.zt       = inst.AllocateMatrix({cfg.latent_size, cfg.latent_size, cfg.latent_ch},          "tr_zt");
-    buf.tChannel = inst.AllocateMatrix({cfg.latent_size, cfg.latent_size, kTimeConditionChannels}, "tr_tchan");
-    buf.unetIn   = inst.AllocateMatrix({cfg.latent_size, cfg.latent_size, cfg.latent_ch + kTimeConditionChannels}, "tr_unet_in");
+    buf.image    = inst.AllocateMatrix(MatrixShape::Image(1u,cfg.image_ch,cfg.image_size,cfg.image_size),           "tr_image");
+    buf.latent   = inst.AllocateMatrix(MatrixShape::Image(1u,cfg.latent_ch,cfg.latent_size,cfg.latent_size),          "tr_latent");
+    buf.eps      = inst.AllocateMatrix(MatrixShape::Image(1u,cfg.latent_ch,cfg.latent_size,cfg.latent_size),          "tr_eps");
+    buf.noiseBank= inst.AllocateMatrix(MatrixShape::Image(1u,cfg.latent_ch * 512u,cfg.latent_size,cfg.latent_size),   "tr_noise_bank");
+    buf.zt       = inst.AllocateMatrix(MatrixShape::Image(1u,cfg.latent_ch,cfg.latent_size,cfg.latent_size),          "tr_zt");
+    buf.tChannel = inst.AllocateMatrix(MatrixShape::Image(1u,kTimeConditionChannels,cfg.latent_size,cfg.latent_size), "tr_tchan");
+    buf.unetIn   = inst.AllocateMatrix(MatrixShape::Image(1u,cfg.latent_ch + kTimeConditionChannels,cfg.latent_size,cfg.latent_size), "tr_unet_in");
     return buf;
 }
 
@@ -292,7 +292,7 @@ static void TrainDenoiser(Model<T, MatType>*         vae,
 
         // Build U-Net input: concat(zt, timestep_channel).
         FillTimestepConditioning(buf.tChannel.get(), tIdx, cfg.T_steps);
-        ConcatZ(buf.unetIn.get(), buf.zt.get(), buf.tChannel.get());
+        Concat(buf.unetIn.get(), buf.zt.get(), buf.tChannel.get(),MatrixAxis::Channels);
 
         // Train denoiser to predict the noise eps.
         denoiser->Run(buf.unetIn.get(), epsMat, iter % cfg.log_interval == 0);
@@ -347,10 +347,10 @@ static void Sample(Model<T, MatType>*         vae,
     // ztPrev  = the next, slightly cleaner latent
     // tChan   = the extra timestep information
     // unetIn  = current latent + timestep channels together
-    auto ztRef     = inst.AllocateMatrix({cfg.latent_size, cfg.latent_size, cfg.latent_ch},       "smp_zt");
-    auto ztNextRef = inst.AllocateMatrix({cfg.latent_size, cfg.latent_size, cfg.latent_ch},       "smp_zt_prev");
-    auto tChanRef  = inst.AllocateMatrix({cfg.latent_size, cfg.latent_size, kTimeConditionChannels}, "smp_tchan");
-    auto unetInRef = inst.AllocateMatrix({cfg.latent_size, cfg.latent_size, cfg.latent_ch + kTimeConditionChannels}, "smp_unet_in");
+    auto ztRef     = inst.AllocateMatrix(MatrixShape::Image(1u,cfg.latent_ch,cfg.latent_size,cfg.latent_size),       "smp_zt");
+    auto ztNextRef = inst.AllocateMatrix(MatrixShape::Image(1u,cfg.latent_ch,cfg.latent_size,cfg.latent_size),       "smp_zt_prev");
+    auto tChanRef  = inst.AllocateMatrix(MatrixShape::Image(1u,kTimeConditionChannels,cfg.latent_size,cfg.latent_size), "smp_tchan");
+    auto unetInRef = inst.AllocateMatrix(MatrixShape::Image(1u,cfg.latent_ch + kTimeConditionChannels,cfg.latent_size,cfg.latent_size), "smp_unet_in");
 
     // Start from pure random noise. This is the usual diffusion starting point.
     SampleGaussian(ztRef.get(), rng);
@@ -367,7 +367,7 @@ static void Sample(Model<T, MatType>*         vae,
         FillTimestepConditioning(tChanRef.get(), tIdx, cfg.T_steps);
 
         // Join the current latent and the timestep info into one input tensor for the U-Net.
-        ConcatZ(unetInRef.get(), ztRef.get(), tChanRef.get());
+        Concat(unetInRef.get(), ztRef.get(), tChanRef.get(),MatrixAxis::Channels);
 
         // Run the denoiser. It predicts the noise inside the current latent.
         denoiser->Run(unetInRef.get(), nullptr);
@@ -406,9 +406,9 @@ static void Sample(Model<T, MatType>*         vae,
         LOG_INFO() << "Decoded range: min=" << Minimum(decoded)
                    << " max=" << Maximum(decoded);
         LOG_INFO() << "Sample complete. Image dims: "
-                   << decoded->GetDimsX() << "x"
-                   << decoded->GetDimsY() << "x"
-                   << decoded->GetDimsZ();
+                   << decoded->GetWidth() << "x"
+                   << decoded->GetHeight() << "x"
+                   << decoded->GetPlaneCount();
         PrintMatrixToTerminal(decoded);
     }
     else

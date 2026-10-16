@@ -22,7 +22,7 @@ struct ConvTransposeSettings
 {
     uint32_t inChannels = 0u;
     uint32_t outChannels = 0u;
-    Dims3D   kernelSize = Dims3D(1u, 1u, 1u);
+    MatrixShape   kernelSize = MatrixShape::Matrix(1u,1u);
     uint32_t stride = 1u;
     uint32_t padding = 0u;
     uint32_t outputPadding = 0u;
@@ -34,7 +34,7 @@ struct ConvTransposeSettings
 template<class T, class Mat = MatrixCPU<T>>
 Datablob<T, Mat>* InitConv2DTransposeBlob(uint32_t       _inChannels,
                                           uint32_t       _outChannels,
-                                          Dims3D         _kernelSize,
+                                          MatrixShape         _kernelSize,
                                           uint32_t       _batchSize       = 1,
                                           uint32_t       _stride          = 1,
                                           uint32_t       _padding         = 0,
@@ -49,29 +49,29 @@ Datablob<T, Mat>* InitConv2DTransposeBlob(uint32_t       _inChannels,
 
     for (uint32_t i = 0; i < _outChannels; ++i)
     {
-        auto kernelWeights = inst.AllocateMatrix({_kernelSize.x, _kernelSize.y, _inChannels}, "kernelWeights" + std::to_string(i));
+        auto kernelWeights = inst.AllocateMatrix(MatrixShape::Image(1u,_inChannels,_kernelSize.width,_kernelSize.height), "kernelWeights" + std::to_string(i));
         blob->Set("KernelWeights_" + std::to_string(i), kernelWeights);
 
         if (_initForTraining)
         {
-            auto wUpdate = inst.AllocateMatrix({_kernelSize.x, _kernelSize.y, _inChannels}, "WUpdate_" + std::to_string(i));
+            auto wUpdate = inst.AllocateMatrix(MatrixShape::Image(1u,_inChannels,_kernelSize.width,_kernelSize.height), "WUpdate_" + std::to_string(i));
             blob->Set("WUpdate_" + std::to_string(i), wUpdate);
         }
     }
 
     if (_useBias)
     {
-        auto bias = inst.AllocateMatrix({_outChannels, _batchSize}, "Bias");
+        auto bias = inst.AllocateMatrix(MatrixShape::Matrix(_outChannels), "Bias");
         blob->Set("Bias", bias);
         if (_initForTraining)
         {
-            auto bUpdate = inst.AllocateMatrix({_outChannels, _batchSize}, "BUpdate");
+            auto bUpdate = inst.AllocateMatrix(MatrixShape::Matrix(_outChannels), "BUpdate");
             blob->Set("BUpdate", bUpdate);
         }
     }
 
-    blob->Set("KernelSizeX", _kernelSize.x);
-    blob->Set("KernelSizeY", _kernelSize.y);
+    blob->Set("KernelSizeX", _kernelSize.width);
+    blob->Set("KernelSizeY", _kernelSize.height);
     blob->Set("InChannels", _inChannels);
     blob->Set("OutChannels", _outChannels);
     blob->Set("Batchsize", _batchSize);
@@ -198,10 +198,6 @@ public:
     {
         MatrixRef outputRef = _blob->AcquireMatrix("Output_0");
         Mat* output = outputRef.get();
-        if (output)
-        {
-            return;
-        }
 
         MatrixRef inputRef = _blob->AcquireMatrix("Input_0");
         Mat* input = inputRef.get();
@@ -210,7 +206,7 @@ public:
             return;
         }
 
-        if (input->GetDimsX() == 0u || input->GetDimsY() == 0u || input->GetDimsZ() == 0u)
+        if (input->GetWidth() == 0u || input->GetHeight() == 0u || input->GetChannelCount() == 0u)
         {
             return;
         }
@@ -231,45 +227,45 @@ public:
         uint32_t outputPadding = _blob->GetUInt("OutputPadding");
         uint32_t outChannels = _blob->GetUInt("OutChannels");
 
-        const int64_t outx64 = static_cast<int64_t>(_input->GetDimsX() - 1u) * static_cast<int64_t>(stride)
-                             - static_cast<int64_t>(2u * padding)
+        if (!stride || !dilation || !kW || !kH || outputPadding>=std::max(stride,dilation))
+            throw std::invalid_argument("Transposed convolution geometry is invalid.");
+        const int64_t outx64 = static_cast<int64_t>(_input->GetWidth() - 1u) * static_cast<int64_t>(stride)
+                             - 2ll * padding
                              + static_cast<int64_t>(dilation) * static_cast<int64_t>(kW - 1u)
                              + static_cast<int64_t>(outputPadding)
                              + 1;
-        const int64_t outy64 = static_cast<int64_t>(_input->GetDimsY() - 1u) * static_cast<int64_t>(stride)
-                             - static_cast<int64_t>(2u * padding)
+        const int64_t outy64 = static_cast<int64_t>(_input->GetHeight() - 1u) * static_cast<int64_t>(stride)
+                             - 2ll * padding
                              + static_cast<int64_t>(dilation) * static_cast<int64_t>(kH - 1u)
                              + static_cast<int64_t>(outputPadding)
                              + 1;
 
-        assert(outx64 > 0 && outy64 > 0);
+        if (outx64<=0 || outy64<=0 || outx64>UINT32_MAX || outy64>UINT32_MAX)
+            throw std::invalid_argument("Transposed convolution output dimensions are invalid.");
         const uint32_t outx = static_cast<uint32_t>(outx64);
         const uint32_t outy = static_cast<uint32_t>(outy64);
 
-        auto outputRef = inst.AllocateMatrix({outx, outy, outChannels}, "Output_0");
-        _blob->Set("Output_0", outputRef);
+        this->EnsureMatrix(_blob,"Output_0",MatrixShape::Image(_input->GetBatchCount(),outChannels,outx,outy));
 
         if constexpr (!kIsIdentity)
         {
-            auto outputPreActivationRef = inst.AllocateMatrix({outx, outy, outChannels}, "OutputPreActivation");
-            _blob->Set("OutputPreActivation", outputPreActivationRef);
+            this->EnsureMatrix(_blob,"OutputPreActivation",MatrixShape::Image(_input->GetBatchCount(),outChannels,outx,outy));
         }
 
         MatrixRef wUpdateRef = _blob->AcquireMatrix("WUpdate_0");
         if (wUpdateRef.get() != nullptr)
         {
-            auto errorOut = inst.AllocateMatrix({_input->GetDimsX(), _input->GetDimsY(), _input->GetDimsZ()}, "ErrorOutput_0");
-            _blob->Set("ErrorOutput_0", errorOut);
+            this->EnsureMatrix(_blob,"ErrorOutput_0",_input->GetShape());
             if constexpr (!kIsIdentity)
             {
-                auto deltaRef = inst.AllocateMatrix({outx, outy, outChannels}, "Delta");
-                _blob->Set("Delta", deltaRef);
+                this->EnsureMatrix(_blob,"Delta",MatrixShape::Image(_input->GetBatchCount(),outChannels,outx,outy));
             }
         }
     }
 
     void Forward(Datablob<T, Mat>* _blob) override
     {
+        EnsureOutputsAllocated(_blob);
         MatrixRef inputRef = _blob->AcquireMatrix("Input_0");
         Mat* input = inputRef.get();
         MatrixRef outputRef = _blob->AcquireMatrix("Output_0");
@@ -287,7 +283,7 @@ public:
 
         assert(input);
         assert(output);
-        assert(input->GetDimsZ() == inChannels && "Input channels must match Conv2DTranspose in-channels");
+        assert(input->GetChannelCount() == inChannels && "Input channels must match Conv2DTranspose in-channels");
 
         Mat* linearOut = kIsIdentity ? output : outputPreActivation;
 
@@ -300,7 +296,7 @@ public:
             {
                 continue;
             }
-            assert(kernel->GetDimsZ() == inChannels);
+            assert(kernel->GetChannelCount() == inChannels);
             Conv2DTransposeSingleChannel<T>(linearOut, input, kernel, bias, oc, stride, dilation, padding);
         }
 
@@ -336,7 +332,7 @@ public:
 
         assert(errorIn);
         assert(input);
-        assert(input->GetDimsZ() == inChannels);
+        assert(input->GetChannelCount() == inChannels);
 
         Mat* effectiveError = errorIn;
         if constexpr (!kIsIdentity)
@@ -352,6 +348,11 @@ public:
         if (bUpdate)
             Clear(bUpdate);
 
+        if(bUpdate) {
+            auto biasChannels=this->CachedView(_blob,"BiasChannels",bUpdateRef,MatrixShape::Image(1u,outChannels,1u,1u));
+            ReduceSum(biasChannels.get(),effectiveError,MatrixAxes::Batch|MatrixAxes::Width|MatrixAxes::Height);
+        }
+
         for (uint32_t oc = 0; oc < outChannels; ++oc)
         {
             MatrixRef wUpdateRef = _blob->AcquireMatrix("WUpdate_" + std::to_string(oc));
@@ -365,13 +366,10 @@ public:
             {
                 continue;
             }
-            assert(kernel->GetDimsZ() == inChannels);
+            assert(kernel->GetChannelCount() == inChannels);
 
             // Calculate Bias Gradient: Sum errorIn over spatial dims.
-            if (bUpdate)
-            {
-                SumSpatialDimension(bUpdate, effectiveError, oc, Dims3D(oc, 0u, 0u));
-            }
+
             Conv2DTransposeSingleChannelBackwards<T>(effectiveError, input, kernel, wUpdate, errorOut, oc, stride, dilation, padding);
         }
     }

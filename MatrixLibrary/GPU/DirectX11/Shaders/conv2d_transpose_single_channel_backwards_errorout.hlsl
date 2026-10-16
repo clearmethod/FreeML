@@ -5,9 +5,9 @@ cbuffer MatErrorIn_Params : register(b0)
     uint error_dimz;
     uint error_offset;
     uint error_uniqueId;
-    uint error_pad0;
-    uint error_pad1;
-    uint error_pad2;
+    uint error_channels;
+    uint error_batch;
+    uint error_reserved;
     uint4 error_optionalParams[4];
 };
 
@@ -18,9 +18,9 @@ cbuffer MatInput_Params : register(b1)
     uint input_dimz;
     uint input_offset;
     uint input_uniqueId;
-    uint input_pad0;
-    uint input_pad1;
-    uint input_pad2;
+    uint input_channels;
+    uint input_batch;
+    uint input_reserved;
 };
 
 cbuffer MatKernel_Params : register(b2)
@@ -30,9 +30,9 @@ cbuffer MatKernel_Params : register(b2)
     uint kernel_dimz;
     uint kernel_offset;
     uint kernel_uniqueId;
-    uint kernel_pad0;
-    uint kernel_pad1;
-    uint kernel_pad2;
+    uint kernel_channels;
+    uint kernel_batch;
+    uint kernel_reserved;
 };
 
 cbuffer MatErrorOut_Params : register(b3)
@@ -42,9 +42,9 @@ cbuffer MatErrorOut_Params : register(b3)
     uint errorout_dimz;
     uint errorout_offset;
     uint errorout_uniqueId;
-    uint errorout_pad0;
-    uint errorout_pad1;
-    uint errorout_pad2;
+    uint errorout_channels;
+    uint errorout_batch;
+    uint errorout_reserved;
 };
 
 RWStructuredBuffer<float> MatErrorOut : register(u0);
@@ -66,8 +66,9 @@ void CSMain(uint3 dispatchThreadId : SV_DispatchThreadID)
     const int padding = int(error_optionalParams[0].w);
 
     const uint errorOutPlane = errorout_dimx * errorout_dimy;
-    const uint ic = idx / errorOutPlane;
-    const uint errorOutPlaneIndex = idx - ic * errorOutPlane;
+    const uint plane = idx / errorOutPlane;
+    const uint ic = plane % errorout_channels, batch = plane / errorout_channels;
+    const uint errorOutPlaneIndex = idx - plane * errorOutPlane;
     const uint inY = errorOutPlaneIndex / errorout_dimx;
     const uint inX = errorOutPlaneIndex - inY * errorout_dimx;
 
@@ -84,7 +85,7 @@ void CSMain(uint3 dispatchThreadId : SV_DispatchThreadID)
                 continue;
 
             const uint kernelIdx = kernel_offset + ic * kernelPlane + ky * kernel_dimx + kx;
-            const uint errorIdx = error_offset + outputChannel * errorPlane + uint(outY) * error_dimx + uint(outX);
+            const uint errorIdx = error_offset + (batch * error_channels + outputChannel) * errorPlane + uint(outY) * error_dimx + uint(outX);
             sum += MatKernel[kernelIdx] * MatErrorIn[errorIdx];
         }
     }

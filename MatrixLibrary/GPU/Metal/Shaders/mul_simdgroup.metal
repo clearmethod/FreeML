@@ -5,7 +5,7 @@ using namespace metal;
 struct MatrixParams
 {
     uint dimx, dimy, dimz, offset;
-    uint uniqueId, pad0, pad1, pad2;
+    uint uniqueId, channels, batch, reserved;
     uint optionalParams[16];
 };
 
@@ -31,9 +31,9 @@ kernel void mul_simdgroup(device float* out [[buffer(0)]],
     const uint rc = strided && r.optionalParams[1] ? r.optionalParams[1] : 1u;
     const uint orow = strided && o.optionalParams[0] ? o.optionalParams[0] : o.dimx;
     const uint ocol = strided && o.optionalParams[1] ? o.optionalParams[1] : 1u;
-    const uint lb = l.offset + group.z * (strided ? l.optionalParams[2] : lr * l.dimy);
-    const uint rb = r.offset + group.z * (strided ? r.optionalParams[2] : rr * r.dimy);
-    const uint ob = o.offset + group.z * (strided ? o.optionalParams[2] : orow * o.dimy);
+    const uint lb = l.offset + (l.batch == 1u ? 0u : group.z / o.channels) * (strided ? l.optionalParams[3] : lr * l.dimy * l.channels) + (l.channels == 1u ? 0u : group.z % o.channels) * (strided ? l.optionalParams[2] : lr * l.dimy);
+    const uint rb = r.offset + (r.batch == 1u ? 0u : group.z / o.channels) * (strided ? r.optionalParams[3] : rr * r.dimy * r.channels) + (r.channels == 1u ? 0u : group.z % o.channels) * (strided ? r.optionalParams[2] : rr * r.dimy);
+    const uint ob = o.offset + (o.batch == 1u ? 0u : group.z / o.channels) * (strided ? o.optionalParams[3] : orow * o.dimy * o.channels) + (o.channels == 1u ? 0u : group.z % o.channels) * (strided ? o.optionalParams[2] : orow * o.dimy);
     // Four 32-lane SIMD groups each accumulate a 16x16 quadrant.
     // Stage transposes/strides and partial edges into dense, zero-padded tiles.
     const uint inner = transposeL ? l.dimy : l.dimx;

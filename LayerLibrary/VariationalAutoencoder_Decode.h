@@ -120,7 +120,7 @@ public:
             _blob->Set("Output_0", nextRef);
         }
 
-        this->EnsureMatrix(_blob, "ErrorOutput_0", input->GetDimsX(), input->GetDimsY(), input->GetDimsZ());
+        this->EnsureMatrix(_blob, "ErrorOutput_0", input->GetShape());
     }
 
     void Forward(Datablob<T, Mat>* _blob) override

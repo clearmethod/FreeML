@@ -5,9 +5,9 @@ cbuffer MatDGamma_Params : register(b0)
     uint dgamma_dimz;
     uint dgamma_offset;
     uint dgamma_uniqueId;
-    uint dgamma_pad0;
-    uint dgamma_pad1;
-    uint dgamma_pad2;
+    uint dgamma_channels;
+    uint dgamma_batch;
+    uint dgamma_reserved;
 };
 
 cbuffer MatDBeta_Params : register(b1)
@@ -17,9 +17,9 @@ cbuffer MatDBeta_Params : register(b1)
     uint dbeta_dimz;
     uint dbeta_offset;
     uint dbeta_uniqueId;
-    uint dbeta_pad0;
-    uint dbeta_pad1;
-    uint dbeta_pad2;
+    uint dbeta_channels;
+    uint dbeta_batch;
+    uint dbeta_reserved;
 };
 
 cbuffer MatDY_Params : register(b2)
@@ -29,9 +29,9 @@ cbuffer MatDY_Params : register(b2)
     uint dy_dimz;
     uint dy_offset;
     uint dy_uniqueId;
-    uint dy_pad0;
-    uint dy_pad1;
-    uint dy_pad2;
+    uint dy_channels;
+    uint dy_batch;
+    uint dy_reserved;
 };
 
 cbuffer MatXHat_Params : register(b3)
@@ -41,9 +41,9 @@ cbuffer MatXHat_Params : register(b3)
     uint xhat_dimz;
     uint xhat_offset;
     uint xhat_uniqueId;
-    uint xhat_pad0;
-    uint xhat_pad1;
-    uint xhat_pad2;
+    uint xhat_channels;
+    uint xhat_batch;
+    uint xhat_reserved;
 };
 
 RWStructuredBuffer<float> MatDGamma : register(u0);

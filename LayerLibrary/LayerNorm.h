@@ -95,12 +95,12 @@ class LayerNorm : public Layer<T, Mat>
             return;
         }
 
-        this->EnsureMatrix(_blob, "Output_0", input->GetDimsX(), input->GetDimsY(), input->GetDimsZ());
+        this->EnsureMatrix(_blob, "Output_0", input->GetShape());
         if (_blob->GetUInt("TrainingEnabled") > 0u)
         {
-            this->EnsureMatrix(_blob, "XHat", input->GetDimsX(), input->GetDimsY(), input->GetDimsZ());
-            this->EnsureMatrix(_blob, "InvStd", 1u, input->GetDimsY(), input->GetDimsZ());
-            this->EnsureMatrix(_blob, "ErrorOutput_0", input->GetDimsX(), input->GetDimsY(), input->GetDimsZ());
+            this->EnsureMatrix(_blob, "XHat", input->GetShape());
+            this->EnsureMatrix(_blob, "InvStd", MatrixShape::Image(input->GetBatchCount(), input->GetChannelCount(), 1u, input->GetHeight()));
+            this->EnsureMatrix(_blob, "ErrorOutput_0", input->GetShape());
         }
     }
 
@@ -110,7 +110,7 @@ class LayerNorm : public Layer<T, Mat>
         MatrixManager<T, Mat>& inst = MatrixManager<T, Mat>::Instance();
         assert(_input);
 
-        auto gScale = inst.AllocateMatrix({_input->GetDimsX(), 1u}, "GammaScale");
+        auto gScale = inst.AllocateMatrix(MatrixShape::Matrix(_input->GetWidth(),1u), "GammaScale");
         _blob->Set("GammaScale", gScale);
 
         // Match standard LayerNorm initialization: gamma=1, beta=0.
@@ -118,32 +118,32 @@ class LayerNorm : public Layer<T, Mat>
         const bool useBias = _blob->GetUInt("UseBias") > 0u;
         if (useBias)
         {
-            auto bShift = inst.AllocateMatrix({_input->GetDimsX(), 1u}, "BetaShift");
+            auto bShift = inst.AllocateMatrix(MatrixShape::Matrix(_input->GetWidth(),1u), "BetaShift");
             _blob->Set("BetaShift", bShift);
             Fill(bShift.get(), static_cast<T>(0));
         }
 
-        auto output = inst.AllocateMatrix(_input->GetDims(), "Output_0");
+        auto output = inst.AllocateMatrix(_input->GetShape(), "Output_0");
         _blob->Set("Output_0", output);
 
         if(_blob->GetUInt("TrainingEnabled") > 0u)
         {
-            auto xHat = inst.AllocateMatrix(_input->GetDims(), "XHat");
+            auto xHat = inst.AllocateMatrix(_input->GetShape(), "XHat");
             _blob->Set("XHat", xHat);
 
-            auto invStd = inst.AllocateMatrix({1u, _input->GetDimsY(), _input->GetDimsZ()}, "InvStd");
+            auto invStd = inst.AllocateMatrix(MatrixShape::Image(_input->GetBatchCount(), _input->GetChannelCount(), 1u, _input->GetHeight()), "InvStd");
             _blob->Set("InvStd", invStd);
 
-            auto outputErr = inst.AllocateMatrix(_input->GetDims(), "ErrorOutput_0");
+            auto outputErr = inst.AllocateMatrix(_input->GetShape(), "ErrorOutput_0");
             _blob->Set("ErrorOutput_0", outputErr);
 
-            auto gScaleGrad = inst.AllocateMatrix({_input->GetDimsX(), 1u}, "GammaScale_Grad");
+            auto gScaleGrad = inst.AllocateMatrix(MatrixShape::Matrix(_input->GetWidth(),1u), "GammaScale_Grad");
             _blob->Set("GammaScale_Grad", gScaleGrad);
 
             Fill(gScaleGrad.get(), static_cast<T>(0));
             if (useBias)
             {
-                auto bShiftGrad = inst.AllocateMatrix({_input->GetDimsX(), 1u}, "BetaShift_Grad");
+                auto bShiftGrad = inst.AllocateMatrix(MatrixShape::Matrix(_input->GetWidth(),1u), "BetaShift_Grad");
                 _blob->Set("BetaShift_Grad", bShiftGrad);
                 Fill(bShiftGrad.get(), static_cast<T>(0));
             }

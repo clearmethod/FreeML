@@ -156,6 +156,14 @@ From here you can experiment with linking different layers together, most layers
 
 # Demos
 
+Matrix function and layer forward/backward tests are available through CTest for CPU, DirectX 11 (Windows),
+and Metal (macOS). See [testing/README.md](testing/README.md) for build commands
+and coverage.
+
+Per-layer forward/backward runtime evaluators are available in [eval](eval/README.md).
+Build with `cmake --build build --target LayerEval`, then run
+`./build/eval/LayerEval` for side-by-side timings across available matrix backends.
+
 ## Examples/HelloFreeML
 A minimal end-to-end example that follows the Getting Started guide and shows how to create a model, wire layer dependencies, run training, and inspect loss/output logs.
 Source: `Examples/HelloFreeML/HelloFreeML.cpp`
@@ -165,6 +173,87 @@ Source: `Examples/HelloFreeML/HelloFreeML.cpp`
 A simple gate implemented with Dense layers to demonstrate how to assemble models and the input/training data.
 
 ## Examples/NanoLLM (*NanoGPT++*)
+Metal cross-entropy keeps logits, targets and gradients on the GPU. Index targets
+use a mean over valid rows (ignoring `-1`); one-hot targets preserve the existing
+summed-loss convention. Requesting a loss value reads back only one scalar.
+
+NanoLLM warms up its base learning rate for `warmup_updates` optimizer updates,
+then follows cosine decay from `learning_rate` to `minimum_learning_rate` by
+`decay_updates`, holding the minimum afterward. Defaults are 100 warmup updates,
+5,000 decay updates, and rates of 0.001 and 0.0001. Accumulated sequence passes
+share one rate. The schedule resumes from AdamW's checkpointed parameter step
+counts and continues across training cycles; logs show the cumulative update
+count and rate used. Schedule settings come from the current configuration.
+
+NanoLLM reports `Loss` as the mean over all sampled sequences contributing to
+the optimizer update. `Rolling loss` averages the last 100 completed batch
+means (or all completed batches if fewer than 100). These are training losses;
+the rolling window starts fresh when the process resumes a checkpoint.
+Metal accumulates these sequence losses on the GPU and reads one batch mean
+after the sequence passes and optimizer work have been recorded. Other models
+can use `BeginLossBatch()` before their passes and `EndLossBatch()` afterward;
+ending a loss batch does not flush accumulated gradients. CPU and other losses
+use their existing scalar evaluation through the same interface.
+Timing summaries show the final readback under `Batch Loss`, once per batch;
+its wait includes completion of previously queued GPU work.
+NanoLLM logs `Update(ms)` and `Tokens/s` after that completion boundary, covering
+all accumulation passes and the optimizer update, excluding subsequent decoding,
+printing and checkpoint saves. Asynchronous `Total Run`/layer timings measure CPU
+calls and must not be used as completed training throughput. To attribute waits
+to individual layers, set `NanoLLMConfig::sync_layer_timings = true`; this adds
+completion waits and changes execution overlap.
+
+Token decoding and accuracy read each matrix once and index its batches directly;
+they do not create temporary GPU matrix views. `MatrixManager` reports owned tensor
+buffer bytes rather than counting borrowed views as additional allocations.
+Constant buffers, staging and backend caches are not included in that tensor total.
+
+
+Dropout uses the shared `DropoutMask(matrix, probability, seed)` function.
+Metal and DirectX11 generate binary keep masks directly on the GPU; CPU uses
+the same integer hash. The seed is optional and defaults to a fresh seed per
+call. An explicit seed reproduces the same logical mask across backends and
+slice offsets. Forward applies the existing inverted-dropout scaling, and
+backward reuses the saved mask without generating new random values.
+
+`NanoLLMConfig::gradient_clip_norm` defaults to 1.0 (zero disables clipping).
+The model clips the global L2 norm after combining shared parameter gradients
+and averaging accumulated passes, before any optimizer step. Other models can
+opt in with `SetGradientClipNorm`; clipping is disabled by default. The
+norm calculation uses parallel reductions on Metal and DirectX11, with reusable
+scratch buffers and a GPU-resident scale factor. CPU retains its double-precision
+reduction and non-finite error check; the GPU path omits that error check and
+performs no gradient readback or norm-related completion wait. NanoLLM reapplies
+the setting when loading a checkpoint.
+
+NanoLLM enables `selective_weight_decay`: Dense biases and LayerNorm gamma/beta
+use zero decay, while Dense and embedding weights use AdamW's configured decay
+strength. The existing decay strength remains 0.01 for fresh models (or the saved
+value for loaded models). Other models retain uniform decay unless they call
+`SetSelectiveWeightDecay(true)`. Layers can override
+`GetWeightDecayScale(blob, parameter)`; composite layers inherit their child
+policies. Tied parameters must agree on the scale, and accumulation keeps the
+policy through the optimizer update. NanoLLM reapplies the mode on checkpoint load.
+
+`NanoLLMConfig::gradient_accumulation_steps` defaults to 8 sampled sequences
+per optimizer update. `iter_count`, logging and save intervals count optimizer
+updates; use 1 to restore one sequence per update. Gradients are averaged across
+passes, so the learning rate does not need to be divided by this setting.
+
+Other models can call `SetGradientAccumulationSteps(n)` before training.
+`Run(input, target)` accumulates gradients; inference calls do not. Call
+`FlushAccumulatedGradients()` to apply a partial window using its actual pass count,
+or `ResetGradientAccumulation()` to discard it. Changing the window size or saving
+flushes pending gradients; loading clears them. Accumulation settings are runtime
+configuration and are not stored in checkpoints. Each pass
+has equal weight, which matches NanoLLM's fixed-size training windows.
+
+Set `NanoLLMConfig::sync_layer_timings = true` to include GPU completion in
+each layer's printed forward/backward timing. This waits around every layer
+and reduces CPU/GPU overlap. The default is `false`. Other models can enable
+the same mode with `model->SetTimingSynchronization(true)` before `Run()`;
+changing modes clears timing history. `PrintTimings()` reports the active mode.
+
 We have a C++ implementation of the Shakespeare model as structured in Karpathy's amazing [NanoGPT](https://github.com/karpathy/nanoGPT) Python project.
 So you can train a GPT-2 lite model and see the output.
 
@@ -255,9 +344,51 @@ Thus
 - Add in more layers.
 - Add learning rate controllers.
 - Add gradient accumulation.
-- Add batch support in current transformer layers.
+- Validate DX11 physical batching on Windows.
 - Switch DirectX11 to Slang, to increase GPU platform support. We would love to have the GPU driver in here too but that is a little outside of the scope...
 
 
 
 
+## Physical batching and matrix shapes
+
+Matrices use `MatrixShape{batch, channels, width, height}` and remain row-major:
+`offset + (((batchIndex * channels + channel) * height + y) * width + x)`.
+Use `MatrixShape::Matrix(width,height)`, `Sequence(batch,features,tokens)` or
+`Image(batch,channels,width,height)` to state intent. Sequences have one channel;
+attention heads use the channel axis internally. Image batches and channels are
+independent. `GetShape()` replaces the former dimensional API.
+
+All concrete layers support physical batches. Dense internally views batch/token
+rows together while sharing weights. Conv2D and transposed convolution share
+kernels across samples; parameter gradients sum across samples. Loss functions
+supply averaging, and gradient accumulation averages microbatch gradients before
+one optimizer update. NanoLLM's effective sequences per update are
+`batch_size * gradient_accumulation_steps`. NanoLLM defaults to physical batch
+8 with 8 accumulation steps, retaining 64 sequences (16,384 tokens at context
+256) per optimizer update. Set the physical batch size in
+`NanoLLMConfig`; set the model's expected input shape before `Init()`. Changing
+a model's input dimensions requires another `Init()` to rebuild graph buffers.
+
+`ReduceSum(out,input,MatrixAxes::Batch | MatrixAxes::Height)` reduces explicit
+axes while retaining singleton dimensions. Binary broadcasting supports singleton
+axes independently. `Concat(out,left,right,MatrixAxis::Channels)` preserves
+samples. `MatMul_Batched` supports independent row/column/channel/batch strides;
+strides are in elements. The legacy single-plane sum/raw multiplication helpers
+keep their original contracts; use the explicit tensor APIs for batched work.
+
+Managed `BatchView`, `ChannelView`, and `ReshapeView` retain backing storage.
+Reshapes preserve element count and do not reorder data. Save files contain
+BATCH/CHANNELS/WIDTH/HEIGHT fields; earlier checkpoint formats are unsupported.
+
+Compare completed forward/backward time, throughput and tensor storage with:
+
+```sh
+cmake --build build --target Eval -j 4
+./build/eval/LayerEval --layer TransformerSixHeads --batch-size 8 --scale 16
+./build/eval/MatrixEval --function Mul --batch-size 8 --scale 64
+```
+
+See [batching-update.md](batching-update.md), [evaluation](eval/README.md) and
+[batching test coverage](testing/README.md). CPU and Metal batching are validated
+locally; DX11 runtime validation requires Windows.

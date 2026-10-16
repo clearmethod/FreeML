@@ -5,9 +5,9 @@ cbuffer MatOut_Params : register(b0)
     uint out_dimz;
     uint out_offset;
     uint out_uniqueId;
-    uint out_pad0;
-    uint out_pad1;
-    uint out_pad2;
+    uint out_channels;
+    uint out_batch;
+    uint out_reserved;
 };
 
 cbuffer MatSoft_Params : register(b1)
@@ -17,9 +17,9 @@ cbuffer MatSoft_Params : register(b1)
     uint soft_dimz;
     uint soft_offset;
     uint soft_uniqueId;
-    uint soft_pad0;
-    uint soft_pad1;
-    uint soft_pad2;
+    uint soft_channels;
+    uint soft_batch;
+    uint soft_reserved;
 };
 
 cbuffer MatGrad_Params : register(b2)
@@ -29,9 +29,9 @@ cbuffer MatGrad_Params : register(b2)
     uint grad_dimz;
     uint grad_offset;
     uint grad_uniqueId;
-    uint grad_pad0;
-    uint grad_pad1;
-    uint grad_pad2;
+    uint grad_channels;
+    uint grad_batch;
+    uint grad_reserved;
 };
 
 RWStructuredBuffer<float> MatOut : register(u0);

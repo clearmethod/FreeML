@@ -245,9 +245,7 @@ public:
             {
                 this->EnsureMatrix(_blob,
                                    ("SkipError_" + std::to_string(i)).c_str(),
-                                   outRef->GetDimsX(),
-                                   outRef->GetDimsY(),
-                                   outRef->GetDimsZ());
+                                   outRef->GetShape());
             }
         }
 
@@ -298,7 +296,7 @@ public:
 
         // ErrorOut: error propagated to the input
         this->EnsureMatrix(_blob, "ErrorOutput_0",
-                           input->GetDimsX(), input->GetDimsY(), input->GetDimsZ());
+                           input->GetShape());
     }
 
     void Forward(Datablob<T, Mat>* _blob) override

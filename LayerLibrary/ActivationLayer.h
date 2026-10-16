@@ -17,7 +17,7 @@
 #include "Datablob.h"
 
 template<class T, class Mat = MatrixCPU<T>>
-Datablob<T, Mat>* InitActivationBlob(  Dims3D         _dims,
+Datablob<T, Mat>* InitActivationBlob(  MatrixShape         _dims,
                                     std::string&   _outputName,
                                     uint32_t       _batchSize = 1,
                                     bool           _initForTraining = true)
@@ -62,8 +62,17 @@ class ActivationLayer : public Layer<T, Mat>
         return _blob->AcquireMatrix("Output_0");
     }
 
+    void EnsureOutputsAllocated(Datablob<T,Mat>* blob) override
+    {
+        Mat* input=blob->GetMatrix("Input_0");if(!input) return;
+        const bool training=blob->GetMatrix("ErrorOutput_0")!=nullptr;
+        this->EnsureMatrix(blob,"Output_0",input->GetShape());
+        if(training) this->EnsureMatrix(blob,"ErrorOutput_0",input->GetShape());
+    }
+
     void Forward(Datablob<T, Mat>* _blob) override
     {
+        EnsureOutputsAllocated(_blob);
         typename MatrixManager<T, Mat>::MatrixRef inputRef = _blob->AcquireMatrix("Input_0");
         Mat* input = inputRef.get();
         typename MatrixManager<T, Mat>::MatrixRef outputRef = _blob->AcquireMatrix("Output_0");

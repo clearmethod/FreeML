@@ -9,9 +9,9 @@ cbuffer MatLatent_Params : register(b0)
     uint latent_dimz;
     uint latent_offset;
     uint latent_uniqueId;
-    uint latent_pad0;
-    uint latent_pad1;
-    uint latent_pad2;
+    uint latent_channels;
+    uint latent_batch;
+    uint latent_reserved;
     uint4 latent_optionalParams[4]; // [0].x = seed
 };
 
@@ -22,9 +22,9 @@ cbuffer MatMu_Params : register(b1)
     uint mu_dimz;
     uint mu_offset;
     uint mu_uniqueId;
-    uint mu_pad0;
-    uint mu_pad1;
-    uint mu_pad2;
+    uint mu_channels;
+    uint mu_batch;
+    uint mu_reserved;
 };
 
 cbuffer MatLogVar_Params : register(b2)
@@ -34,9 +34,9 @@ cbuffer MatLogVar_Params : register(b2)
     uint lv_dimz;
     uint lv_offset;
     uint lv_uniqueId;
-    uint lv_pad0;
-    uint lv_pad1;
-    uint lv_pad2;
+    uint lv_channels;
+    uint lv_batch;
+    uint lv_reserved;
 };
 
 cbuffer MatEps_Params : register(b3)
@@ -46,9 +46,9 @@ cbuffer MatEps_Params : register(b3)
     uint eps_dimz;
     uint eps_offset;
     uint eps_uniqueId;
-    uint eps_pad0;
-    uint eps_pad1;
-    uint eps_pad2;
+    uint eps_channels;
+    uint eps_batch;
+    uint eps_reserved;
 };
 
 RWStructuredBuffer<float> MatLatent : register(u0);

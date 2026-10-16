@@ -28,24 +28,24 @@ Datablob<T, Mat>* InitEmbeddingBlob(uint32_t _num_embeddings,
 
     blob->Set("Embedding_TrainingEnabled", _initForTraining ? 1u : 0u);
 
-    auto weights = inst.AllocateMatrix({_embed_dim, _num_embeddings}, "Embedding_Weights");
+    auto weights = inst.AllocateMatrix(MatrixShape::Matrix(_embed_dim,_num_embeddings), "Embedding_Weights");
     blob->Set("Embedding_Weights", weights);
 
     if (_initForTraining)
     {
-        auto wUpdate = inst.AllocateMatrix({_embed_dim, _num_embeddings}, "Embedding_WUpdate");
+        auto wUpdate = inst.AllocateMatrix(MatrixShape::Matrix(_embed_dim,_num_embeddings), "Embedding_WUpdate");
         blob->Set("Embedding_WUpdate", wUpdate);
     }
 
-    auto output = inst.AllocateMatrix({_embed_dim, _sequence_length, _batch_size}, "Embedding_Output_0");
+    auto output = inst.AllocateMatrix(MatrixShape::Sequence(_batch_size, _embed_dim, _sequence_length), "Embedding_Output_0");
     blob->Set("Output_0", output);
-    auto scalarZero = inst.AllocateMatrix({1u, 1u, 1u}, "Embedding_ScalarZero");
+    auto scalarZero = inst.AllocateMatrix(MatrixShape::Matrix(1u,1u), "Embedding_ScalarZero");
     scalarZero->SetValue(0u, 0u, T(0));
     blob->Set("Embedding_ScalarZero", scalarZero);
 
     if (_initForTraining)
     {
-        auto outputErr = inst.AllocateMatrix({1u, _sequence_length, _batch_size}, "Embedding_ErrorOut");
+        auto outputErr = inst.AllocateMatrix(MatrixShape::Sequence(_batch_size, 1u, _sequence_length), "Embedding_ErrorOut");
         blob->Set("Embedding_ErrorOut", outputErr);
     }
 
@@ -122,20 +122,21 @@ public:
 
         typename MatrixManager<T, Mat>::MatrixRef outputRef = _blob->AcquireMatrix("Output_0");
         Mat* output = outputRef.get();
-        const uint32_t embedDim = weights->GetDimsX();
-        const uint32_t tokens = input->GetDimsY();
-        const uint32_t batch = input->GetDimsZ();
+        const uint32_t embedDim = weights->GetWidth();
+        const uint32_t tokens = input->GetHeight();
+        const uint32_t batch = input->GetBatchCount();
+        if (input->GetChannelCount()!=1u) throw std::invalid_argument("Embedding expects one token-index channel.");
         const bool outputMismatch = !output
-                                    || output->GetDimsX() != embedDim
-                                    || output->GetDimsY() != tokens
-                                    || output->GetDimsZ() != batch;
+                                    || output->GetWidth() != embedDim
+                                    || output->GetHeight() != tokens
+                                    || output->GetShape() != MatrixShape::Sequence(batch,embedDim,tokens);
         if (outputMismatch)
         {
             if (output)
             {
                 inst.RemoveMatrix(output);
             }
-            auto outputRefNew = inst.AllocateMatrix({embedDim, tokens, batch}, "Embedding_Output_0");
+            auto outputRefNew = inst.AllocateMatrix(MatrixShape::Sequence(batch,embedDim,tokens), "Embedding_Output_0");
             _blob->Set("Output_0", outputRefNew);
         }
 
@@ -144,16 +145,16 @@ public:
             typename MatrixManager<T, Mat>::MatrixRef outputErrRef = _blob->AcquireMatrix("Embedding_ErrorOut");
             Mat* outputErr = outputErrRef.get();
             const bool errMismatch = !outputErr
-                                     || outputErr->GetDimsX() != input->GetDimsX()
-                                     || outputErr->GetDimsY() != tokens
-                                     || outputErr->GetDimsZ() != batch;
+                                     || outputErr->GetWidth() != input->GetWidth()
+                                     || outputErr->GetHeight() != tokens
+                                     || outputErr->GetShape() != input->GetShape();
             if (errMismatch)
             {
                 if (outputErr)
                 {
                     inst.RemoveMatrix(outputErr);
                 }
-                auto outputErrRefNew = inst.AllocateMatrix({input->GetDimsX(), tokens, batch}, "Embedding_ErrorOut");
+                auto outputErrRefNew = inst.AllocateMatrix(input->GetShape(), "Embedding_ErrorOut");
                 _blob->Set("Embedding_ErrorOut", outputErrRefNew);
             }
         }

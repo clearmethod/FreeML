@@ -26,19 +26,7 @@ template <class T, class MatType>
 class MatrixManager
 {
     public:
-    struct ScratchKey
-    {
-        uint32_t x = 0u;
-        uint32_t y = 0u;
-        uint32_t z = 0u;
-
-        bool operator<(const ScratchKey& other) const
-        {
-            if (x != other.x) return x < other.x;
-            if (y != other.y) return y < other.y;
-            return z < other.z;
-        }
-    };
+    using ScratchKey = MatrixShape;
     struct MatrixRef
     {
         MatrixRef() = default;
@@ -159,7 +147,8 @@ class MatrixManager
 
             const uint64_t elements = static_cast<uint64_t>(mat->GetElementCount());
             const uint64_t bytes = elements * sizeof(T);
-            totalBytes += bytes;
+            const uint64_t ownedBytes=mat->GetOwnedBytes();
+            totalBytes += ownedBytes;
 
             uint32_t refCount = 0u;
             auto refIt = m_HandleRefCount.find(handle);
@@ -172,9 +161,10 @@ class MatrixManager
             {
                 ss << "[" << handle << "] "
                    << mat->GetName()
-                   << " dims " << mat->GetDims().GetString()
+                   << " dims " << mat->GetShape().GetString()
                    << " elements " << elements
                    << " bytes " << bytes
+                   << " owned bytes " << ownedBytes
                    << " refs " << refCount
                    << "\n";
             }
@@ -192,15 +182,85 @@ class MatrixManager
         return ss.str();
     }
 
-    MatrixRef AllocateMatrix(const Dims3D& _dims, const std::string& _name, Layer<T, MatType>* _owningLayer = nullptr)
+    uint64_t GetAllocatedBytes() const
     {
-        assert(_dims.x >= 1);
-        assert(_dims.y >= 1);
-        assert(_dims.z >= 1);
+        uint64_t bytes=0u;
+        for(const auto& [handle,matrix] : m_HandleToMatrix)
+            if(matrix) bytes+=matrix->GetOwnedBytes();
+        return bytes;
+    }
+
+    MatrixRef AllocateMatrix(const MatrixShape& _dims, const std::string& _name, Layer<T, MatType>* _owningLayer = nullptr)
+    {
+        if (!_dims.ElementCount())
+            throw std::invalid_argument("Cannot allocate an empty matrix shape.");
+        const uint32_t count = _dims.CheckedElementCount(UINT32_MAX / sizeof(T));
         MatType* newMat = new MatType(nullptr, _dims, _name);
-        newMat->AllocateMemory(_dims.x * _dims.y * _dims.z);
+        newMat->AllocateMemory(count);
         MatrixHandle handle = AddMatrix(newMat, _owningLayer);
         return Acquire(handle);
+    }
+
+    MatrixRef CreateView(const MatrixRef& parent, const MatrixShape& shape,
+                         uint32_t relativeOffset = 0u, const std::string& name = "View")
+    {
+        if (!parent || GetHandle(parent.get()) == InvalidMatrixHandle)
+            throw std::invalid_argument("A view requires a matrix owned by this manager.");
+        const uint32_t count = shape.CheckedElementCount(UINT32_MAX / sizeof(T));
+        if (!count || uint64_t(relativeOffset) + count > parent->GetElementCount())
+            throw std::out_of_range("Matrix view exceeds its parent extent.");
+        const uint64_t offset = uint64_t(parent->GetOffset()) + relativeOffset;
+        if (offset > UINT32_MAX) throw std::overflow_error("Matrix view offset exceeds backend limits.");
+        auto view = std::make_unique<MatType>();
+        view->BindView(parent.get(),shape,relativeOffset);
+        view->SetName(name);
+        view->RetainViewParent(std::make_shared<MatrixRef>(parent),parent.get());
+        const MatrixHandle handle = AddMatrix(view.get());
+        view.release();
+        return Acquire(handle);
+    }
+
+    void UpdateView(MatrixRef& view,const MatrixRef& parent,const MatrixShape& shape,uint32_t relativeOffset=0u)
+    {
+        if(!view) { view=CreateView(parent,shape,relativeOffset);return; }
+        if(!parent || view.get()==parent.get() || !view->GetViewParent()
+            || GetHandle(parent.get())==InvalidMatrixHandle)
+            throw std::invalid_argument("Only managed views can be rebound to a managed parent.");
+        for(auto* ancestor=parent.get();ancestor;ancestor=static_cast<MatType*>(ancestor->GetViewParent()))
+            if(ancestor==view.get()) throw std::invalid_argument("Matrix views cannot form ownership cycles.");
+        const auto count=shape.CheckedElementCount(UINT32_MAX/sizeof(T));
+        if(!count || uint64_t(relativeOffset)+count>parent->GetElementCount()
+            || uint64_t(parent->GetOffset())+relativeOffset>UINT32_MAX)
+            throw std::out_of_range("Rebound view exceeds its parent extent.");
+        view->BindView(parent.get(),shape,relativeOffset);
+        if(view->GetViewParent()!=parent.get())
+            view->RetainViewParent(std::make_shared<MatrixRef>(parent),parent.get());
+    }
+
+    MatrixRef ReshapeView(const MatrixRef& parent, const MatrixShape& shape)
+    {
+        if (!parent || shape.ElementCount() != parent->GetElementCount())
+            throw std::invalid_argument("Reshape must preserve the matrix element count.");
+        return CreateView(parent, shape, 0u, "ReshapeView");
+    }
+
+    MatrixRef BatchView(const MatrixRef& parent, uint32_t batch)
+    {
+        if (!parent || batch >= parent->GetBatchCount())
+            throw std::out_of_range("Batch index exceeds the matrix extent.");
+        MatrixShape shape = parent->GetShape();
+        shape.batch = 1u;
+        return CreateView(parent, shape, batch * shape.CheckedElementCount(), "BatchView");
+    }
+
+    MatrixRef ChannelView(const MatrixRef& parent, uint32_t batch, uint32_t channel)
+    {
+        if (!parent || batch >= parent->GetBatchCount() || channel >= parent->GetChannelCount())
+            throw std::out_of_range("Channel index exceeds the matrix extent.");
+        const auto& shape = parent->GetShape();
+        const auto plane = MatrixShape::Matrix(shape.width, shape.height);
+        return CreateView(parent, plane,
+            (batch * shape.channels + channel) * plane.CheckedElementCount(), "ChannelView");
     }
 
     MatrixHandle AddMatrix(MatType* _matrix, Layer<T, MatType>* _owningLayer = nullptr)
@@ -217,17 +277,14 @@ class MatrixManager
         return handle;
     }
 
-    MatType* GetScratch(const Dims3D& _dims)
+    MatType* GetScratch(const MatrixShape& _dims)
     {
-        ScratchKey key{_dims.x, _dims.y, _dims.z};
+        ScratchKey key = _dims;
         auto it = m_ScratchRefs.find(key);
         if (it != m_ScratchRefs.end())
         {
             MatType* existing = it->second.get();
-            if (existing
-                && existing->GetDimsX() == _dims.x
-                && existing->GetDimsY() == _dims.y
-                && existing->GetDimsZ() == _dims.z)
+            if (existing && existing->GetShape() == _dims)
             {
                 return existing;
             }
@@ -267,7 +324,7 @@ class MatrixManager
             return ref;
         }
 
-        MatType* skeleton = new MatType(nullptr, Dims3D(), _name);
+        MatType* skeleton = new MatType(nullptr, MatrixShape(), _name);
         AddMatrix(skeleton);
         MatrixHandle handle = GetHandle(skeleton);
         if (handle != InvalidMatrixHandle)
@@ -474,7 +531,10 @@ class MatrixManager
         }
 
         MatType* mat = it->second;
-        LOG_INFO() << "Freeing: " << mat->GetName() << ". Size: " << mat->GetElementCount() * sizeof(T) << " bytes.";
+        if (const auto ownedBytes=mat->GetOwnedBytes(); ownedBytes>0u)
+            LOG_INFO() << "Freeing: " << mat->GetName() << ". Size: " << ownedBytes << " bytes.";
+        else
+            LOG_DEBUG() << "Releasing matrix metadata: " << mat->GetName();
         if(!IsSkeleton(mat))
             mat->FreeMemory();
         delete mat;

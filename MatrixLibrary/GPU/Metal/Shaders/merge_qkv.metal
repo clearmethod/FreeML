@@ -8,9 +8,9 @@ struct MatrixParams
     uint dimz;
     uint offset;
     uint uniqueId;
-    uint pad0;
-    uint pad1;
-    uint pad2;
+    uint channels;
+    uint batch;
+    uint reserved;
     uint optionalParams[16];
 };
 
@@ -32,12 +32,13 @@ kernel void merge_qkv(device float* packed [[buffer(0)]],
 
     const uint headDim = qParams.dimx;
     const uint tokens = qParams.dimy;
-    const uint nHead = qParams.dimz;
+    const uint nHead = qParams.channels;
     const uint dC = headDim * nHead;
     const uint headPlane = headDim * tokens;
 
-    const uint head = idx / headPlane;
-    const uint rem = idx - head * headPlane;
+    const uint plane = idx / headPlane;
+    const uint head = plane % nHead, batch = plane / nHead;
+    const uint rem = idx - plane * headPlane;
     const uint row = rem / headDim;
     const uint col = rem - row * headDim;
 
@@ -45,7 +46,7 @@ kernel void merge_qkv(device float* packed [[buffer(0)]],
     const uint srcK = kParams.offset + idx;
     const uint srcV = vParams.offset + idx;
 
-    const uint rowPackedBase = packedParams.offset + row * (3u * dC);
+    const uint rowPackedBase = packedParams.offset + (batch * tokens + row) * (3u * dC);
     const uint dstQ = rowPackedBase + head * headDim + col;
 
     packed[dstQ] = q[srcQ];

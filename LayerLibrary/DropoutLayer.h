@@ -28,12 +28,12 @@ Datablob<T, Mat>* InitDropoutBlob(float _probability = 0.01f, bool _initForTrain
     blob->Set("TrainingEnabled", _initForTraining? 1u : 0u);
     blob->Set("Probability", _probability);
 
-    auto scalarScale = inst.AllocateMatrix({1u, 1u, 1u}, "ScalarScale");
+    auto scalarScale = inst.AllocateMatrix(MatrixShape::Matrix(1u,1u), "ScalarScale");
     scalarScale->SetValue(0u, 0u, T(1) / (T(1) - _probability));
     blob->Set("ScalarScale", scalarScale);
 
-    auto scalarZero = inst.AllocateMatrix({1u, 1u, 1u}, "ScalarZero");
-    auto scalarOne = inst.AllocateMatrix({1u, 1u, 1u}, "ScalarOne");
+    auto scalarZero = inst.AllocateMatrix(MatrixShape::Matrix(1u,1u), "ScalarZero");
+    auto scalarOne = inst.AllocateMatrix(MatrixShape::Matrix(1u,1u), "ScalarOne");
     scalarZero->SetValue(0u, 0u, T(0));
     scalarOne->SetValue(0u, 0u, T(1));
     blob->Set("ScalarZero", scalarZero);
@@ -71,12 +71,13 @@ class DropoutLayer : public Layer<T, Mat>
             return;
         }
 
-        this->EnsureMatrix(_blob, "Output_0", input->GetDimsX(), input->GetDimsY(), input->GetDimsZ());
+        this->EnsureMatrix(_blob, "Output_0", input->GetShape());
         if (_blob->GetUInt("TrainingEnabled") > 0u)
         {
-            this->EnsureMatrix(_blob, "Mask", input->GetDimsX(), input->GetDimsY(), input->GetDimsZ());
-            this->EnsureMatrix(_blob, "ErrorOutput_0", input->GetDimsX(), input->GetDimsY(), input->GetDimsZ());
+            this->EnsureMatrix(_blob, "Mask", input->GetShape());
         }
+        if (_blob->GetUInt("TrainingEnabled") > 0u || _blob->GetMatrix("ErrorOutput_0"))
+            this->EnsureMatrix(_blob, "ErrorOutput_0", input->GetShape());
     }
 
     void DynamicInit(Datablob<T, Mat>* _blob, Mat* _input)
@@ -84,15 +85,15 @@ class DropoutLayer : public Layer<T, Mat>
         // Allocate an output matrix.
         MatrixManager<T, Mat>& inst = MatrixManager<T, Mat>::Instance();
 
-        auto output = inst.AllocateMatrix(_input->GetDims(), "Output_0");
+        auto output = inst.AllocateMatrix(_input->GetShape(), "Output_0");
         _blob->Set("Output_0", output);
 
         if(_blob->GetUInt("TrainingEnabled") > 0u)
         {
-            auto mask = inst.AllocateMatrix(_input->GetDims(), "Mask");
+            auto mask = inst.AllocateMatrix(_input->GetShape(), "Mask");
             _blob->Set("Mask", mask);
 
-            auto outputErr = inst.AllocateMatrix(_input->GetDims(), "ErrorOutput_0");
+            auto outputErr = inst.AllocateMatrix(_input->GetShape(), "ErrorOutput_0");
             _blob->Set("ErrorOutput_0", outputErr);
         }
     }

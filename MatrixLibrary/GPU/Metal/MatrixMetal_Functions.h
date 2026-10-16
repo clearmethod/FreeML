@@ -44,22 +44,94 @@ inline bool MetalSyncCBuffer(MatrixMetal<T>* mat)
     }
 
     return mat->m_gInstance->UpdateCachedCBuffer(mat->m_dataHandles.m_cbufferHandle,
-                                                 mat->GetDimsX(),
-                                                 mat->GetDimsY(),
-                                                 mat->GetDimsZ(),
+                                                 mat->GetWidth(),
+                                                 mat->GetHeight(),
+                                                 mat->GetPlaneCount(),
                                                  mat->GetOffset(),
-                                                 params.uniqueId);
+                                                 params.uniqueId, mat->GetChannelCount(), mat->GetBatchCount());
+}
+
+template<class T>
+void BroadcastBinary(MatrixMetal<T>* out, MatrixMetal<T>* left, MatrixMetal<T>* right, uint32_t operation)
+{
+    if (!out || !left || !right || operation>2u
+        || out->GetShape()!=left->GetShape().BroadcastWith(right->GetShape()))
+        throw std::invalid_argument("Broadcast operation output shape is incorrect.");
+    uint32_t flags=operation;
+    for (auto [input,bit] : {std::pair{left,4u},std::pair{right,8u}}) {
+        if (input->m_dataHandles.m_bufferHandle==out->m_dataHandles.m_bufferHandle) {
+            if(input->GetShape()!=out->GetShape() || input->GetOffset()!=out->GetOffset())
+                throw std::invalid_argument("Broadcast output cannot overlap a differently shaped input.");
+            flags|=bit;
+        }
+    }
+    auto* gpu=out->m_gInstance;
+    for (auto* matrix : {out,left,right}) {
+        matrix->Unmap();if(!MetalSyncCBuffer(matrix)) throw std::runtime_error("Cannot bind broadcast parameters.");
+    }
+    gpu->SetCBufferOptionalParams(out->m_dataHandles.m_cbufferHandle,&flags,1u);
+    Obj pipeline=gpu->GetPipeline("broadcast_binary"),encoder=gpu->GetEncoder();
+    if(!pipeline || !encoder) throw std::runtime_error("Metal broadcast pipeline is unavailable.");
+    Send<void>(encoder,"setComputePipelineState:",pipeline);
+    MatrixMetal<T>* matrices[]={out,left,right};
+    for(uint64_t index=0;index<3;++index) {
+        Send<void>(encoder,"setBuffer:offset:atIndex:",gpu->GetBuffer(matrices[index]->m_dataHandles.m_bufferHandle),0ull,index);
+        MetalBindCBuffer(encoder,gpu->GetCBuffer(matrices[index]->m_dataHandles.m_cbufferHandle),index+3u);
+    }
+    const MTLSize threads={out->GetElementCount(),1u,1u},group={256u,1u,1u};
+    Send<void>(encoder,"dispatchThreads:threadsPerThreadgroup:",threads,group);gpu->WorkSubmitted();
+}
+
+template<class T>
+void BroadcastMul(MatrixMetal<T>* out,MatrixMetal<T>* left,MatrixMetal<T>* right)
+{ BroadcastBinary(out,left,right,2u); }
+
+template<class T>
+void BroadcastAddRows(MatrixMetal<T>* out,MatrixMetal<T>* left,MatrixMetal<T>* right)
+{ BroadcastBinary(out,left,right,0u); }
+
+template<class T>
+void BroadcastSubRows(MatrixMetal<T>* out,MatrixMetal<T>* left,MatrixMetal<T>* right)
+{ BroadcastBinary(out,left,right,1u); }
+
+template<class T>
+void BroadcastMulRows(MatrixMetal<T>* out,MatrixMetal<T>* left,MatrixMetal<T>* right)
+{ BroadcastBinary(out,left,right,2u); }
+
+template<class T>
+void ReduceSum(MatrixMetal<T>* out, MatrixMetal<T>* input, MatrixAxes axes)
+{
+    if (!out || !input || out->GetShape() != input->GetShape().Reduced(axes))
+        throw std::invalid_argument("ReduceSum output shape is incorrect.");
+    if (out->m_dataHandles.m_bufferHandle == input->m_dataHandles.m_bufferHandle)
+        throw std::invalid_argument("ReduceSum requires distinct input and output storage.");
+    out->Unmap();input->Unmap();
+    auto* gpu=out->m_gInstance;
+    if (!MetalSyncCBuffer(out) || !MetalSyncCBuffer(input))
+        throw std::runtime_error("Cannot bind reduction parameters.");
+    const uint32_t optional[]={static_cast<uint32_t>(axes)};
+    gpu->SetCBufferOptionalParams(out->m_dataHandles.m_cbufferHandle,optional,1u);
+    Obj pipeline=gpu->GetPipeline("reduce_sum"),encoder=gpu->GetEncoder();
+    if (!pipeline || !encoder) throw std::runtime_error("Metal reduction pipeline is unavailable.");
+    Send<void>(encoder,"setComputePipelineState:",pipeline);
+    Send<void>(encoder,"setBuffer:offset:atIndex:",gpu->GetBuffer(out->m_dataHandles.m_bufferHandle),0ull,0ull);
+    Send<void>(encoder,"setBuffer:offset:atIndex:",gpu->GetBuffer(input->m_dataHandles.m_bufferHandle),0ull,1ull);
+    MetalBindCBuffer(encoder,gpu->GetCBuffer(out->m_dataHandles.m_cbufferHandle),2ull);
+    MetalBindCBuffer(encoder,gpu->GetCBuffer(input->m_dataHandles.m_cbufferHandle),3ull);
+    const MTLSize groups={out->GetElementCount(),1u,1u},threads={256u,1u,1u};
+    Send<void>(encoder,"dispatchThreadgroups:threadsPerThreadgroup:",groups,threads);
+    gpu->WorkSubmitted();
 }
 
 template<class T>
 void GatherRows(MatrixMetal<T>* out, MatrixMetal<T>* src, MatrixMetal<T>* indices)
 {
     assert(out && src && indices);
-    assert(indices->GetDimsX() == 1u);
-    assert(out->GetDimsX() == src->GetDimsX());
-    assert(indices->GetDimsY() == out->GetDimsY());
-    assert(indices->GetDimsZ() == out->GetDimsZ());
-    assert(src->GetDimsZ() == 1u || src->GetDimsZ() == out->GetDimsZ());
+    assert(indices->GetWidth() == 1u);
+    assert(out->GetWidth() == src->GetWidth());
+    assert(indices->GetHeight() == out->GetHeight());
+    assert(indices->GetPlaneCount() == out->GetPlaneCount());
+    assert(src->GetPlaneCount() == 1u || src->GetPlaneCount() == out->GetPlaneCount());
     const uint32_t count = out->GetElementCount();
     if (count == 0u) return;
     auto* manager = out->m_gInstance;
@@ -91,11 +163,11 @@ template<class T>
 void ScatterAddRows(MatrixMetal<T>* out, MatrixMetal<T>* src, MatrixMetal<T>* indices)
 {
     assert(out && src && indices);
-    assert(indices->GetDimsX() == 1u);
-    assert(src->GetDimsX() == out->GetDimsX());
-    assert(src->GetDimsY() == indices->GetDimsY());
-    assert(src->GetDimsZ() == indices->GetDimsZ());
-    assert(out->GetDimsZ() == 1u || out->GetDimsZ() == src->GetDimsZ());
+    assert(indices->GetWidth() == 1u);
+    assert(src->GetWidth() == out->GetWidth());
+    assert(src->GetHeight() == indices->GetHeight());
+    assert(src->GetPlaneCount() == indices->GetPlaneCount());
+    assert(out->GetPlaneCount() == 1u || out->GetPlaneCount() == src->GetPlaneCount());
     auto* manager = out->m_gInstance;
     out->Unmap(); src->Unmap(); indices->Unmap();
     if (!MetalSyncCBuffer(out) || !MetalSyncCBuffer(src) || !MetalSyncCBuffer(indices))
@@ -114,7 +186,7 @@ void ScatterAddRows(MatrixMetal<T>* out, MatrixMetal<T>* src, MatrixMetal<T>* in
     MetalBindCBuffer(encoder, manager->GetCBuffer(out->m_dataHandles.m_cbufferHandle), 3ull);
     MetalBindCBuffer(encoder, manager->GetCBuffer(src->m_dataHandles.m_cbufferHandle), 4ull);
     MetalBindCBuffer(encoder, manager->GetCBuffer(indices->m_dataHandles.m_cbufferHandle), 5ull);
-    const uint32_t count = out->GetDimsX() * out->GetDimsZ();
+    const uint32_t count = out->GetWidth() * out->GetPlaneCount();
     if (count == 0u)
         return;
     MTLSize threads = {count, 1u, 1u}, group = {256u, 1u, 1u};
@@ -163,6 +235,23 @@ void Copy(MatrixMetal<T>* _out, MatrixMetal<T>* _in)
     manager->DumpInfoQueueErrors();
 }
 
+
+template<class T>
+void CopyRange(MatrixMetal<T>* out, MatrixMetal<T>* input,
+               uint32_t outOffset, uint32_t inOffset, uint32_t count)
+{
+    if (!out || !input || uint64_t(outOffset)+count>out->GetElementCount()
+        || uint64_t(inOffset)+count>input->GetElementCount())
+        throw std::out_of_range("CopyRange exceeds matrix bounds.");
+    if (!count) return;
+    out->Unmap();
+    input->Unmap();
+    if (!out->m_gInstance->CopyBuffer(out->m_dataHandles.m_bufferHandle,
+            input->m_dataHandles.m_bufferHandle,
+            (uint64_t(out->GetOffset())+outOffset)*sizeof(T),
+            (uint64_t(input->GetOffset())+inOffset)*sizeof(T), uint64_t(count)*sizeof(T)))
+        throw std::runtime_error("Metal CopyRange failed.");
+}
 
 template<class T>
 void Clear(MatrixMetal<T>* _out)
@@ -243,7 +332,7 @@ void SoftmaxBackwards(MatrixMetal<T>* _out, MatrixMetal<T>* _softmaxOut, MatrixM
     constexpr uint64_t groupSize = 256u;
     Send<void>(encoder, "setThreadgroupMemoryLength:atIndex:", groupSize * sizeof(float), 0ull);
 
-    const uint32_t rowCount = _out->GetDimsY() * _out->GetDimsZ();
+    const uint32_t rowCount = _out->GetHeight() * _out->GetPlaneCount();
     MTLSize threads = {rowCount * groupSize, 1, 1};
     MTLSize threadsPerThreadgroup = {groupSize, 1, 1};
     Send<void>(encoder, "dispatchThreads:threadsPerThreadgroup:", threads, threadsPerThreadgroup);
@@ -257,11 +346,11 @@ void AttentionScoresBackwards(MatrixMetal<T>* out, MatrixMetal<T>* probs,
                               MatrixMetal<T>* grad, MatrixMetal<T>* scale)
 {
     assert(out && probs && grad && scale);
-    assert(out->GetDimsX() == out->GetDimsY());
-    assert(out->GetDimsX() == probs->GetDimsX() && out->GetDimsY() == probs->GetDimsY()
-           && out->GetDimsZ() == probs->GetDimsZ());
-    assert(out->GetDimsX() == grad->GetDimsX() && out->GetDimsY() == grad->GetDimsY()
-           && out->GetDimsZ() == grad->GetDimsZ());
+    assert(out->GetWidth() == out->GetHeight());
+    assert(out->GetWidth() == probs->GetWidth() && out->GetHeight() == probs->GetHeight()
+           && out->GetPlaneCount() == probs->GetPlaneCount());
+    assert(out->GetWidth() == grad->GetWidth() && out->GetHeight() == grad->GetHeight()
+           && out->GetPlaneCount() == grad->GetPlaneCount());
     assert(scale->GetElementCount() == 1u);
     if (out->GetElementCount() == 0u) return;
     auto* manager = out->m_gInstance;
@@ -281,7 +370,7 @@ void AttentionScoresBackwards(MatrixMetal<T>* out, MatrixMetal<T>* probs,
     }
     constexpr uint64_t groupSize = 256u;
     Send<void>(encoder, "setThreadgroupMemoryLength:atIndex:", groupSize * sizeof(float), 0ull);
-    MTLSize groups = {out->GetDimsY() * out->GetDimsZ(), 1, 1};
+    MTLSize groups = {out->GetHeight() * out->GetPlaneCount(), 1, 1};
     MTLSize threads = {groupSize, 1, 1};
     Send<void>(encoder, "dispatchThreadgroups:threadsPerThreadgroup:", groups, threads);
     manager->WorkSubmitted();
@@ -292,8 +381,8 @@ void SumColumns(MatrixMetal<T>* _out, MatrixMetal<T>* _in)
 {
     assert(_out);
     assert(_in);
-    assert(_out->GetDimsX() == _in->GetDimsX());
-    assert(_out->GetDimsY() > 0);
+    assert(_out->GetWidth() == _in->GetWidth());
+    assert(_out->GetHeight() > 0);
 
     MetalManager* manager = _out->m_gInstance ? _out->m_gInstance : MetalManager::Instance();
     if (!manager)
@@ -305,7 +394,7 @@ void SumColumns(MatrixMetal<T>* _out, MatrixMetal<T>* _in)
     _out->Unmap();
     _in->Unmap();
 
-    Obj parallelPipeline = _in->GetDimsY() >= 64u
+    Obj parallelPipeline = _in->GetHeight() >= 64u
         ? manager->GetPipeline("sum_columns_parallel") : nullptr;
     const bool parallel = parallelPipeline != nullptr;
     Obj pipeline = parallel ? parallelPipeline : manager->GetPipeline("sum_columns");
@@ -342,11 +431,11 @@ void SumColumns(MatrixMetal<T>* _out, MatrixMetal<T>* _in)
     MetalBindCBuffer(encoder, outCBuffer, 2ull);
     MetalBindCBuffer(encoder, inCBuffer, 3ull);
 
-    MTLSize threads = {_out->GetDimsX(), 1, 1};
+    MTLSize threads = {_out->GetWidth(), 1, 1};
     MTLSize threadsPerThreadgroup = {256u, 1, 1};
     if (parallel)
         Send<void>(encoder, "dispatchThreadgroups:threadsPerThreadgroup:",
-            MTLSize{(_out->GetDimsX()+31u)/32u,1u,1u},MTLSize{32u,8u,1u});
+            MTLSize{(_out->GetWidth()+31u)/32u,1u,1u},MTLSize{32u,8u,1u});
     else
         Send<void>(encoder, "dispatchThreads:threadsPerThreadgroup:", threads, threadsPerThreadgroup);
 
@@ -380,15 +469,15 @@ void Softmax(MatrixMetal<T>* _out, MatrixMetal<T>* _in)
     }
 
     if (!manager->UpdateCachedCBuffer(_out->m_dataHandles.m_cbufferHandle,
-                                      _out->GetDimsX(),
-                                      _out->GetDimsY(),
-                                      _out->GetDimsZ(),
+                                      _out->GetWidth(),
+                                      _out->GetHeight(),
+                                      _out->GetPlaneCount(),
                                       _out->GetOffset(),
                                       static_cast<uint32_t>(_out->GetID()))
         || !manager->UpdateCachedCBuffer(_in->m_dataHandles.m_cbufferHandle,
-                                         _in->GetDimsX(),
-                                         _in->GetDimsY(),
-                                         _in->GetDimsZ(),
+                                         _in->GetWidth(),
+                                         _in->GetHeight(),
+                                         _in->GetPlaneCount(),
                                          _in->GetOffset(),
                                          static_cast<uint32_t>(_in->GetID())))
     {
@@ -420,7 +509,7 @@ void Softmax(MatrixMetal<T>* _out, MatrixMetal<T>* _in)
     constexpr uint64_t groupSize = 256u;
     Send<void>(encoder, "setThreadgroupMemoryLength:atIndex:", groupSize * sizeof(float), 0ull);
 
-    const uint32_t rowCount = _out->GetDimsY() * _out->GetDimsZ();
+    const uint32_t rowCount = _out->GetHeight() * _out->GetPlaneCount();
     MTLSize threads = {rowCount * groupSize, 1, 1};
     MTLSize threadsPerThreadgroup = {groupSize, 1, 1};
     Send<void>(encoder, "dispatchThreads:threadsPerThreadgroup:", threads, threadsPerThreadgroup);
@@ -447,13 +536,13 @@ void SplitQKV(MatrixMetal<T>* _q,
         return;
     }
 
-    const uint32_t dC = _q->GetDimsX();
-    const uint32_t rows = _q->GetDimsY() * _q->GetDimsZ();
+    const uint32_t dC = _q->GetWidth();
+    const uint32_t rows = _q->GetHeight() * _q->GetPlaneCount();
     assert(_k->GetElementCount() == qCount);
     assert(_v->GetElementCount() == qCount);
     assert(_packed->GetElementCount() == qCount * 3u);
-    assert(_packed->GetDimsX() == dC * 3u);
-    assert((_packed->GetDimsY() * _packed->GetDimsZ()) == rows);
+    assert(_packed->GetWidth() == dC * 3u);
+    assert((_packed->GetHeight() * _packed->GetPlaneCount()) == rows);
 
     MetalManager* manager = _q->m_gInstance ? _q->m_gInstance : MetalManager::Instance();
     if (!manager)
@@ -475,27 +564,27 @@ void SplitQKV(MatrixMetal<T>* _q,
     }
 
     if (!manager->UpdateCachedCBuffer(_q->m_dataHandles.m_cbufferHandle,
-                                      _q->GetDimsX(),
-                                      _q->GetDimsY(),
-                                      _q->GetDimsZ(),
+                                      _q->GetWidth(),
+                                      _q->GetHeight(),
+                                      _q->GetPlaneCount(),
                                       _q->GetOffset(),
                                       static_cast<uint32_t>(_q->GetID()))
         || !manager->UpdateCachedCBuffer(_k->m_dataHandles.m_cbufferHandle,
-                                         _k->GetDimsX(),
-                                         _k->GetDimsY(),
-                                         _k->GetDimsZ(),
+                                         _k->GetWidth(),
+                                         _k->GetHeight(),
+                                         _k->GetPlaneCount(),
                                          _k->GetOffset(),
                                          static_cast<uint32_t>(_k->GetID()))
         || !manager->UpdateCachedCBuffer(_v->m_dataHandles.m_cbufferHandle,
-                                         _v->GetDimsX(),
-                                         _v->GetDimsY(),
-                                         _v->GetDimsZ(),
+                                         _v->GetWidth(),
+                                         _v->GetHeight(),
+                                         _v->GetPlaneCount(),
                                          _v->GetOffset(),
                                          static_cast<uint32_t>(_v->GetID()))
         || !manager->UpdateCachedCBuffer(_packed->m_dataHandles.m_cbufferHandle,
-                                         _packed->GetDimsX(),
-                                         _packed->GetDimsY(),
-                                         _packed->GetDimsZ(),
+                                         _packed->GetWidth(),
+                                         _packed->GetHeight(),
+                                         _packed->GetPlaneCount(),
                                          _packed->GetOffset(),
                                          static_cast<uint32_t>(_packed->GetID())))
     {
@@ -551,9 +640,9 @@ void MergeQKV(MatrixMetal<T>* _packedQKV,
     assert(_kHeads);
     assert(_vHeads);
 
-    const uint32_t headDim = _qHeads->GetDimsX();
-    const uint32_t tokens = _qHeads->GetDimsY();
-    const uint32_t nHead = _qHeads->GetDimsZ();
+    const uint32_t headDim = _qHeads->GetWidth();
+    const uint32_t tokens = _qHeads->GetHeight();
+    const uint32_t nHead = _qHeads->GetChannelCount();
     const uint32_t dC = headDim * nHead;
     const uint32_t qCount = _qHeads->GetElementCount();
     if (qCount == 0u)
@@ -561,18 +650,18 @@ void MergeQKV(MatrixMetal<T>* _packedQKV,
         return;
     }
 
-    assert(_kHeads->GetDimsX() == headDim);
-    assert(_kHeads->GetDimsY() == tokens);
-    assert(_kHeads->GetDimsZ() == nHead);
-    assert(_vHeads->GetDimsX() == headDim);
-    assert(_vHeads->GetDimsY() == tokens);
-    assert(_vHeads->GetDimsZ() == nHead);
+    assert(_kHeads->GetWidth() == headDim);
+    assert(_kHeads->GetHeight() == tokens);
+    assert(_kHeads->GetChannelCount() == nHead);
+    assert(_vHeads->GetWidth() == headDim);
+    assert(_vHeads->GetHeight() == tokens);
+    assert(_vHeads->GetChannelCount() == nHead);
     assert(_kHeads->GetElementCount() == qCount);
     assert(_vHeads->GetElementCount() == qCount);
 
-    assert(_packedQKV->GetDimsX() == 3u * dC);
-    assert(_packedQKV->GetDimsY() == tokens);
-    assert(_packedQKV->GetDimsZ() == 1u);
+    assert(_packedQKV->GetWidth() == 3u * dC);
+    assert(_packedQKV->GetHeight() == tokens);
+    assert(_packedQKV->GetChannelCount() == 1u && _packedQKV->GetBatchCount() == _qHeads->GetBatchCount());
     assert(_packedQKV->GetElementCount() == qCount * 3u);
 
     MetalManager* manager = _packedQKV->m_gInstance ? _packedQKV->m_gInstance : MetalManager::Instance();
@@ -641,91 +730,7 @@ void MergeQKV(MatrixMetal<T>* _packedQKV,
 
 template<class T>
 void BroadcastAdd(MatrixMetal<T>* _out, MatrixMetal<T>* _L, MatrixMetal<T>* _R)
-{
-    assert(_out);
-    assert(_L);
-    assert(_R);
-    assert(_out->GetDimsX() == _L->GetDimsX());
-    assert(_out->GetDimsY() == _L->GetDimsY());
-    assert(_out->GetDimsZ() == _L->GetDimsZ());
-    assert(_R->GetElementCount() >= _L->GetDimsX());
-
-    MetalManager* manager = _out->m_gInstance ? _out->m_gInstance : MetalManager::Instance();
-    if (!manager)
-    {
-        return;
-    }
-
-    manager->DumpInfoQueueErrors();
-    _out->Unmap();
-    _L->Unmap();
-    _R->Unmap();
-
-    Obj outBuffer = manager->GetBuffer(_out->m_dataHandles.m_bufferHandle);
-    Obj leftBuffer = manager->GetBuffer(_L->m_dataHandles.m_bufferHandle);
-    Obj biasBuffer = manager->GetBuffer(_R->m_dataHandles.m_bufferHandle);
-    if (!outBuffer || !leftBuffer || !biasBuffer)
-    {
-        return;
-    }
-
-    if (outBuffer != leftBuffer)
-    {
-        Copy(_out, _L);
-        _out->Unmap();
-    }
-
-    Obj pipeline = manager->GetPipeline("broadcast_add");
-    Obj queue = manager->GetQueue();
-    if (!pipeline || !queue)
-    {
-        return;
-    }
-
-    if (!manager->UpdateCachedCBuffer(_out->m_dataHandles.m_cbufferHandle,
-                                      _out->GetDimsX(),
-                                      _out->GetDimsY(),
-                                      _out->GetDimsZ(),
-                                      _out->GetOffset(),
-                                      static_cast<uint32_t>(_out->GetID()))
-        || !manager->UpdateCachedCBuffer(_R->m_dataHandles.m_cbufferHandle,
-                                         _R->GetDimsX(),
-                                         _R->GetDimsY(),
-                                         _R->GetDimsZ(),
-                                         _R->GetOffset(),
-                                         static_cast<uint32_t>(_R->GetID())))
-    {
-        return;
-    }
-
-    Obj outCBuffer = manager->GetCBuffer(_out->m_dataHandles.m_cbufferHandle);
-    Obj biasCBuffer = manager->GetCBuffer(_R->m_dataHandles.m_cbufferHandle);
-    if (!outCBuffer || !biasCBuffer)
-    {
-        return;
-    }
-
-    Obj commandBuffer = manager->GetCommandBuffer();
-    Obj encoder = manager->GetEncoder();
-    if (!commandBuffer || !encoder)
-    {
-        return;
-    }
-
-    Send<void>(encoder, "setComputePipelineState:", pipeline);
-    Send<void>(encoder, "setBuffer:offset:atIndex:", outBuffer, 0ull, 0ull);
-    Send<void>(encoder, "setBuffer:offset:atIndex:", biasBuffer, 0ull, 1ull);
-    MetalBindCBuffer(encoder, outCBuffer, 2ull);
-    MetalBindCBuffer(encoder, biasCBuffer, 3ull);
-
-    const uint32_t elementCount = _out->GetElementCount();
-    MTLSize threads = {elementCount, 1, 1};
-    MTLSize threadsPerThreadgroup = {256u, 1, 1};
-    Send<void>(encoder, "dispatchThreads:threadsPerThreadgroup:", threads, threadsPerThreadgroup);
-
-    manager->WorkSubmitted();
-    manager->DumpInfoQueueErrors();
-}
+{ BroadcastBinary(_out,_L,_R,0u); }
 
 template<class T>
 void LayerNormOp(MatrixMetal<T>* _out,
@@ -742,26 +747,26 @@ void LayerNormOp(MatrixMetal<T>* _out,
     if (_invStd)
     {
         assert(_xHat);
-        assert(_invStd->GetDimsX() == 1u);
-        assert(_invStd->GetDimsY() == _in->GetDimsY());
-        assert(_invStd->GetDimsZ() == _in->GetDimsZ());
+        assert(_invStd->GetWidth() == 1u);
+        assert(_invStd->GetHeight() == _in->GetHeight());
+        assert(_invStd->GetPlaneCount() == _in->GetPlaneCount());
     }
 
-    assert(_out->GetDimsX() == _in->GetDimsX());
-    assert(_out->GetDimsY() == _in->GetDimsY());
-    assert(_out->GetDimsZ() == _in->GetDimsZ());
-    assert(_gamma->GetDimsX() == _in->GetDimsX());
-    assert(_gamma->GetElementCount() >= _in->GetDimsX());
+    assert(_out->GetWidth() == _in->GetWidth());
+    assert(_out->GetHeight() == _in->GetHeight());
+    assert(_out->GetPlaneCount() == _in->GetPlaneCount());
+    assert(_gamma->GetWidth() == _in->GetWidth());
+    assert(_gamma->GetElementCount() >= _in->GetWidth());
     if (_beta)
     {
-        assert(_beta->GetDimsX() == _in->GetDimsX());
-        assert(_beta->GetElementCount() >= _in->GetDimsX());
+        assert(_beta->GetWidth() == _in->GetWidth());
+        assert(_beta->GetElementCount() >= _in->GetWidth());
     }
     if (_xHat)
     {
-        assert(_xHat->GetDimsX() == _in->GetDimsX());
-        assert(_xHat->GetDimsY() == _in->GetDimsY());
-        assert(_xHat->GetDimsZ() == _in->GetDimsZ());
+        assert(_xHat->GetWidth() == _in->GetWidth());
+        assert(_xHat->GetHeight() == _in->GetHeight());
+        assert(_xHat->GetPlaneCount() == _in->GetPlaneCount());
     }
     (void)_eps;
     if (_invStd) _invStd->Unmap();
@@ -819,21 +824,21 @@ void LayerNormOp(MatrixMetal<T>* _out,
     }
 
     if (!manager->UpdateCachedCBuffer(_out->m_dataHandles.m_cbufferHandle,
-                                      _out->GetDimsX(),
-                                      _out->GetDimsY(),
-                                      _out->GetDimsZ(),
+                                      _out->GetWidth(),
+                                      _out->GetHeight(),
+                                      _out->GetPlaneCount(),
                                       _out->GetOffset(),
                                       static_cast<uint32_t>(_out->GetID()))
         || !manager->UpdateCachedCBuffer(_in->m_dataHandles.m_cbufferHandle,
-                                         _in->GetDimsX(),
-                                         _in->GetDimsY(),
-                                         _in->GetDimsZ(),
+                                         _in->GetWidth(),
+                                         _in->GetHeight(),
+                                         _in->GetPlaneCount(),
                                          _in->GetOffset(),
                                          static_cast<uint32_t>(_in->GetID()))
         || !manager->UpdateCachedCBuffer(_gamma->m_dataHandles.m_cbufferHandle,
-                                         _gamma->GetDimsX(),
-                                         _gamma->GetDimsY(),
-                                         _gamma->GetDimsZ(),
+                                         _gamma->GetWidth(),
+                                         _gamma->GetHeight(),
+                                         _gamma->GetPlaneCount(),
                                          _gamma->GetOffset(),
                                          static_cast<uint32_t>(_gamma->GetID())))
     {
@@ -841,9 +846,9 @@ void LayerNormOp(MatrixMetal<T>* _out,
     }
     if (hasBeta
         && !manager->UpdateCachedCBuffer(_beta->m_dataHandles.m_cbufferHandle,
-                                         _beta->GetDimsX(),
-                                         _beta->GetDimsY(),
-                                         _beta->GetDimsZ(),
+                                         _beta->GetWidth(),
+                                         _beta->GetHeight(),
+                                         _beta->GetPlaneCount(),
                                          _beta->GetOffset(),
                                          static_cast<uint32_t>(_beta->GetID())))
     {
@@ -851,9 +856,9 @@ void LayerNormOp(MatrixMetal<T>* _out,
     }
     if (hasXHat
         && !manager->UpdateCachedCBuffer(_xHat->m_dataHandles.m_cbufferHandle,
-                                         _xHat->GetDimsX(),
-                                         _xHat->GetDimsY(),
-                                         _xHat->GetDimsZ(),
+                                         _xHat->GetWidth(),
+                                         _xHat->GetHeight(),
+                                         _xHat->GetPlaneCount(),
                                          _xHat->GetOffset(),
                                          static_cast<uint32_t>(_xHat->GetID())))
     {
@@ -933,7 +938,7 @@ void LayerNormOp(MatrixMetal<T>* _out,
     constexpr uint64_t groupSize = 256u;
     Send<void>(encoder, "setThreadgroupMemoryLength:atIndex:", groupSize * sizeof(float), 0ull);
 
-    const uint32_t rowCount = _out->GetDimsY() * _out->GetDimsZ();
+    const uint32_t rowCount = _out->GetHeight() * _out->GetPlaneCount();
     MTLSize threads = {rowCount * groupSize, 1, 1};
     MTLSize threadsPerThreadgroup = {groupSize, 1, 1};
     Send<void>(encoder, "dispatchThreads:threadsPerThreadgroup:", threads, threadsPerThreadgroup);
@@ -960,20 +965,20 @@ void LayerNormBackwardsOp(MatrixMetal<T>* _dX,
     if (_invStd)
     {
         assert(_xHat);
-        assert(_invStd->GetDimsX() == 1u);
-        assert(_invStd->GetDimsY() == _in->GetDimsY());
-        assert(_invStd->GetDimsZ() == _in->GetDimsZ());
+        assert(_invStd->GetWidth() == 1u);
+        assert(_invStd->GetHeight() == _in->GetHeight());
+        assert(_invStd->GetPlaneCount() == _in->GetPlaneCount());
     }
 
     assert(_dGamma);
-    assert(_dX->GetDimsX() == _in->GetDimsX());
-    assert(_dX->GetDimsY() == _in->GetDimsY());
-    assert(_dX->GetDimsZ() == _in->GetDimsZ());
-    assert(_dY->GetDimsX() == _in->GetDimsX());
-    assert(_dY->GetDimsY() == _in->GetDimsY());
-    assert(_dY->GetDimsZ() == _in->GetDimsZ());
-    assert(_gamma->GetDimsX() == _in->GetDimsX());
-    assert(_dGamma->GetDimsX() == _in->GetDimsX());
+    assert(_dX->GetWidth() == _in->GetWidth());
+    assert(_dX->GetHeight() == _in->GetHeight());
+    assert(_dX->GetPlaneCount() == _in->GetPlaneCount());
+    assert(_dY->GetWidth() == _in->GetWidth());
+    assert(_dY->GetHeight() == _in->GetHeight());
+    assert(_dY->GetPlaneCount() == _in->GetPlaneCount());
+    assert(_gamma->GetWidth() == _in->GetWidth());
+    assert(_dGamma->GetWidth() == _in->GetWidth());
     (void)_eps;
     if (_invStd) _invStd->Unmap();
 
@@ -1001,7 +1006,7 @@ void LayerNormBackwardsOp(MatrixMetal<T>* _dX,
     }
 
     const bool hasBeta = (_dBeta != nullptr);
-    Obj parallelParamsPipeline = _dY->GetDimsY()*_dY->GetDimsZ() >= 64u
+    Obj parallelParamsPipeline = _dY->GetHeight()*_dY->GetPlaneCount() >= 64u
         ? manager->GetPipeline(hasBeta ? "layernorm_backwards_params_parallel" : "layernorm_backwards_params_nobeta_parallel") : nullptr;
     const bool parallelParams = parallelParamsPipeline != nullptr;
     Obj paramsPipeline = parallelParams ? parallelParamsPipeline
@@ -1077,11 +1082,11 @@ void LayerNormBackwardsOp(MatrixMetal<T>* _dX,
         MetalBindCBuffer(encoder, xHatCBuffer, 5ull);
     }
 
-    MTLSize paramThreads = {_dGamma->GetDimsX(), 1, 1};
+    MTLSize paramThreads = {_dGamma->GetWidth(), 1, 1};
     MTLSize threadsPerThreadgroup = {256u, 1, 1};
     if (parallelParams)
         Send<void>(encoder, "dispatchThreadgroups:threadsPerThreadgroup:",
-            MTLSize{(_dGamma->GetDimsX()+31u)/32u,1u,1u},MTLSize{32u,8u,1u});
+            MTLSize{(_dGamma->GetWidth()+31u)/32u,1u,1u},MTLSize{32u,8u,1u});
     else
         Send<void>(encoder, "dispatchThreads:threadsPerThreadgroup:", paramThreads, threadsPerThreadgroup);
 
@@ -1108,7 +1113,7 @@ void LayerNormBackwardsOp(MatrixMetal<T>* _dX,
     if (!_invStd)
         Send<void>(encoder, "setThreadgroupMemoryLength:atIndex:", groupSize * sizeof(float), 2ull);
 
-    const uint32_t rowCount = _dX->GetDimsY() * _dX->GetDimsZ();
+    const uint32_t rowCount = _dX->GetHeight() * _dX->GetPlaneCount();
     MTLSize dxThreads = {rowCount * groupSize, 1, 1};
     MTLSize dxThreadsPerThreadgroup = {groupSize, 1, 1};
     Send<void>(encoder, "dispatchThreads:threadsPerThreadgroup:", dxThreads, dxThreadsPerThreadgroup);
@@ -1146,22 +1151,22 @@ void PerElementMul(MatrixMetal<T>* _out, MatrixMetal<T>* _in, MatrixMetal<T>* _m
     }
 
     if (!manager->UpdateCachedCBuffer(_out->m_dataHandles.m_cbufferHandle,
-                                      _out->GetDimsX(),
-                                      _out->GetDimsY(),
-                                      _out->GetDimsZ(),
+                                      _out->GetWidth(),
+                                      _out->GetHeight(),
+                                      _out->GetPlaneCount(),
                                       _out->GetOffset(),
                                       static_cast<uint32_t>(_out->GetID()))
         || !manager->UpdateCachedCBuffer(_mask->m_dataHandles.m_cbufferHandle,
-                                         _mask->GetDimsX(),
-                                         _mask->GetDimsY(),
-                                         _mask->GetDimsZ(),
+                                         _mask->GetWidth(),
+                                         _mask->GetHeight(),
+                                         _mask->GetPlaneCount(),
                                          _mask->GetOffset(),
                                          static_cast<uint32_t>(_mask->GetID()))
         || (!aliasOutIn
             && !manager->UpdateCachedCBuffer(_in->m_dataHandles.m_cbufferHandle,
-                                             _in->GetDimsX(),
-                                             _in->GetDimsY(),
-                                             _in->GetDimsZ(),
+                                             _in->GetWidth(),
+                                             _in->GetHeight(),
+                                             _in->GetPlaneCount(),
                                              _in->GetOffset(),
                                              static_cast<uint32_t>(_in->GetID()))))
     {
@@ -1300,10 +1305,10 @@ template<class T>
 void GeluBackwards(MatrixMetal<T>* out, MatrixMetal<T>* input, MatrixMetal<T>* grad)
 {
     assert(out && input && grad);
-    assert(out->GetDimsX() == input->GetDimsX() && out->GetDimsY() == input->GetDimsY()
-           && out->GetDimsZ() == input->GetDimsZ());
-    assert(out->GetDimsX() == grad->GetDimsX() && out->GetDimsY() == grad->GetDimsY()
-           && out->GetDimsZ() == grad->GetDimsZ());
+    assert(out->GetWidth() == input->GetWidth() && out->GetHeight() == input->GetHeight()
+           && out->GetPlaneCount() == input->GetPlaneCount());
+    assert(out->GetWidth() == grad->GetWidth() && out->GetHeight() == grad->GetHeight()
+           && out->GetPlaneCount() == grad->GetPlaneCount());
     if (out->GetElementCount() == 0u) return;
     out->Unmap(); input->Unmap(); grad->Unmap();
     auto* manager = out->m_gInstance;
@@ -1363,22 +1368,22 @@ void Scale(MatrixMetal<T>* _out, MatrixMetal<T>* _in, MatrixMetal<T>* _scale)
     }
 
     if (!manager->UpdateCachedCBuffer(_out->m_dataHandles.m_cbufferHandle,
-                                      _out->GetDimsX(),
-                                      _out->GetDimsY(),
-                                      _out->GetDimsZ(),
+                                      _out->GetWidth(),
+                                      _out->GetHeight(),
+                                      _out->GetPlaneCount(),
                                       _out->GetOffset(),
                                       static_cast<uint32_t>(_out->GetID()))
         || !manager->UpdateCachedCBuffer(_scale->m_dataHandles.m_cbufferHandle,
-                                         _scale->GetDimsX(),
-                                         _scale->GetDimsY(),
-                                         _scale->GetDimsZ(),
+                                         _scale->GetWidth(),
+                                         _scale->GetHeight(),
+                                         _scale->GetPlaneCount(),
                                          _scale->GetOffset(),
                                          static_cast<uint32_t>(_scale->GetID()))
         || (!aliasInOut
             && !manager->UpdateCachedCBuffer(_in->m_dataHandles.m_cbufferHandle,
-                                             _in->GetDimsX(),
-                                             _in->GetDimsY(),
-                                             _in->GetDimsZ(),
+                                             _in->GetWidth(),
+                                             _in->GetHeight(),
+                                             _in->GetPlaneCount(),
                                              _in->GetOffset(),
                                              static_cast<uint32_t>(_in->GetID()))))
     {
@@ -1456,16 +1461,16 @@ void Scale(MatrixMetal<T>* _out, MatrixMetal<T>* _in, float _scale)
     }
 
     if (!manager->UpdateCachedCBuffer(_out->m_dataHandles.m_cbufferHandle,
-                                      _out->GetDimsX(),
-                                      _out->GetDimsY(),
-                                      _out->GetDimsZ(),
+                                      _out->GetWidth(),
+                                      _out->GetHeight(),
+                                      _out->GetPlaneCount(),
                                       _out->GetOffset(),
                                       static_cast<uint32_t>(_out->GetID()))
         || (!aliasInOut
             && !manager->UpdateCachedCBuffer(_in->m_dataHandles.m_cbufferHandle,
-                                             _in->GetDimsX(),
-                                             _in->GetDimsY(),
-                                             _in->GetDimsZ(),
+                                             _in->GetWidth(),
+                                             _in->GetHeight(),
+                                             _in->GetPlaneCount(),
                                              _in->GetOffset(),
                                              static_cast<uint32_t>(_in->GetID()))))
     {
@@ -1541,15 +1546,15 @@ void Fill(MatrixMetal<T>* _out, MatrixMetal<T>* _val)
     }
 
     if (!manager->UpdateCachedCBuffer(_out->m_dataHandles.m_cbufferHandle,
-                                      _out->GetDimsX(),
-                                      _out->GetDimsY(),
-                                      _out->GetDimsZ(),
+                                      _out->GetWidth(),
+                                      _out->GetHeight(),
+                                      _out->GetPlaneCount(),
                                       _out->GetOffset(),
                                       static_cast<uint32_t>(_out->GetID()))
         || !manager->UpdateCachedCBuffer(_val->m_dataHandles.m_cbufferHandle,
-                                         _val->GetDimsX(),
-                                         _val->GetDimsY(),
-                                         _val->GetDimsZ(),
+                                         _val->GetWidth(),
+                                         _val->GetHeight(),
+                                         _val->GetPlaneCount(),
                                          _val->GetOffset(),
                                          static_cast<uint32_t>(_val->GetID())))
     {
@@ -1611,9 +1616,9 @@ void DropoutMask(MatrixMetal<T>* _out, float probability,
     }
 
     if (!manager->UpdateCachedCBuffer(_out->m_dataHandles.m_cbufferHandle,
-                                      _out->GetDimsX(),
-                                      _out->GetDimsY(),
-                                      _out->GetDimsZ(),
+                                      _out->GetWidth(),
+                                      _out->GetHeight(),
+                                      _out->GetPlaneCount(),
                                       _out->GetOffset(),
                                       static_cast<uint32_t>(_out->GetID())))
     {
@@ -1676,9 +1681,9 @@ void Fill(MatrixMetal<T>* _out, float _val)
     }
 
     if (!manager->UpdateCachedCBuffer(_out->m_dataHandles.m_cbufferHandle,
-                                      _out->GetDimsX(),
-                                      _out->GetDimsY(),
-                                      _out->GetDimsZ(),
+                                      _out->GetWidth(),
+                                      _out->GetHeight(),
+                                      _out->GetPlaneCount(),
                                       _out->GetOffset(),
                                       static_cast<uint32_t>(_out->GetID())))
     {
@@ -1893,28 +1898,28 @@ void ScaleAdd(MatrixMetal<T>* _out, MatrixMetal<T>* _in, MatrixMetal<T>* _scale,
     }
 
     if (!manager->UpdateCachedCBuffer(_out->m_dataHandles.m_cbufferHandle,
-                                      _out->GetDimsX(),
-                                      _out->GetDimsY(),
-                                      _out->GetDimsZ(),
+                                      _out->GetWidth(),
+                                      _out->GetHeight(),
+                                      _out->GetPlaneCount(),
                                       _out->GetOffset(),
                                       static_cast<uint32_t>(_out->GetID()))
         || !manager->UpdateCachedCBuffer(_scale->m_dataHandles.m_cbufferHandle,
-                                         _scale->GetDimsX(),
-                                         _scale->GetDimsY(),
-                                         _scale->GetDimsZ(),
+                                         _scale->GetWidth(),
+                                         _scale->GetHeight(),
+                                         _scale->GetPlaneCount(),
                                          _scale->GetOffset(),
                                          static_cast<uint32_t>(_scale->GetID()))
         || !manager->UpdateCachedCBuffer(_add->m_dataHandles.m_cbufferHandle,
-                                         _add->GetDimsX(),
-                                         _add->GetDimsY(),
-                                         _add->GetDimsZ(),
+                                         _add->GetWidth(),
+                                         _add->GetHeight(),
+                                         _add->GetPlaneCount(),
                                          _add->GetOffset(),
                                          static_cast<uint32_t>(_add->GetID()))
         || (!aliasOutIn
             && !manager->UpdateCachedCBuffer(_in->m_dataHandles.m_cbufferHandle,
-                                             _in->GetDimsX(),
-                                             _in->GetDimsY(),
-                                             _in->GetDimsZ(),
+                                             _in->GetWidth(),
+                                             _in->GetHeight(),
+                                             _in->GetPlaneCount(),
                                              _in->GetOffset(),
                                              static_cast<uint32_t>(_in->GetID()))))
     {
@@ -1976,6 +1981,8 @@ void ScaleAdd(MatrixMetal<T>* _out, MatrixMetal<T>* _in, MatrixMetal<T>* _scale,
 template<class T>
 void Add(MatrixMetal<T>* _out, MatrixMetal<T>* _L, MatrixMetal<T>* _R)
 {
+    if (_out->GetShape()!=_L->GetShape() || _out->GetShape()!=_R->GetShape())
+    { BroadcastBinary(_out,_L,_R,0u);return; }
     assert(_out);
     assert(_L);
     assert(_R);
@@ -2007,6 +2014,7 @@ void Add(MatrixMetal<T>* _out, MatrixMetal<T>* _L, MatrixMetal<T>* _R)
     const bool aliasOutRight = sameOutRightBuffer && (_out->GetOffset() == _R->GetOffset());
     if (aliasOutLeft && aliasOutRight)
     {
+        Scale(_out,_out,2.0f);
         return;
     }
 
@@ -2106,6 +2114,8 @@ void Add(MatrixMetal<T>* _out, MatrixMetal<T>* _L, MatrixMetal<T>* _R)
 template<class T>
 void Sub(MatrixMetal<T>* _out, MatrixMetal<T>* _L, MatrixMetal<T>* _R)
 {
+    if (_out->GetShape()!=_L->GetShape() || _out->GetShape()!=_R->GetShape())
+    { BroadcastBinary(_out,_L,_R,1u);return; }
     assert(_out);
     assert(_L);
     assert(_R);
@@ -2158,15 +2168,15 @@ void Sub(MatrixMetal<T>* _out, MatrixMetal<T>* _L, MatrixMetal<T>* _R)
     {
         MatrixMetal<T>* in = aliasOutLeft ? _R : _L;
         if (!manager->UpdateCachedCBuffer(_out->m_dataHandles.m_cbufferHandle,
-                                          _out->GetDimsX(),
-                                          _out->GetDimsY(),
-                                          _out->GetDimsZ(),
+                                          _out->GetWidth(),
+                                          _out->GetHeight(),
+                                          _out->GetPlaneCount(),
                                           _out->GetOffset(),
                                           static_cast<uint32_t>(_out->GetID()))
             || !manager->UpdateCachedCBuffer(in->m_dataHandles.m_cbufferHandle,
-                                             in->GetDimsX(),
-                                             in->GetDimsY(),
-                                             in->GetDimsZ(),
+                                             in->GetWidth(),
+                                             in->GetHeight(),
+                                             in->GetPlaneCount(),
                                              in->GetOffset(),
                                              static_cast<uint32_t>(in->GetID())))
         {
@@ -2196,21 +2206,21 @@ void Sub(MatrixMetal<T>* _out, MatrixMetal<T>* _L, MatrixMetal<T>* _R)
     else
     {
         if (!manager->UpdateCachedCBuffer(_out->m_dataHandles.m_cbufferHandle,
-                                          _out->GetDimsX(),
-                                          _out->GetDimsY(),
-                                          _out->GetDimsZ(),
+                                          _out->GetWidth(),
+                                          _out->GetHeight(),
+                                          _out->GetPlaneCount(),
                                           _out->GetOffset(),
                                           static_cast<uint32_t>(_out->GetID()))
             || !manager->UpdateCachedCBuffer(_L->m_dataHandles.m_cbufferHandle,
-                                             _L->GetDimsX(),
-                                             _L->GetDimsY(),
-                                             _L->GetDimsZ(),
+                                             _L->GetWidth(),
+                                             _L->GetHeight(),
+                                             _L->GetPlaneCount(),
                                              _L->GetOffset(),
                                              static_cast<uint32_t>(_L->GetID()))
             || !manager->UpdateCachedCBuffer(_R->m_dataHandles.m_cbufferHandle,
-                                             _R->GetDimsX(),
-                                             _R->GetDimsY(),
-                                             _R->GetDimsZ(),
+                                             _R->GetWidth(),
+                                             _R->GetHeight(),
+                                             _R->GetPlaneCount(),
                                              _R->GetOffset(),
                                              static_cast<uint32_t>(_R->GetID())))
         {
@@ -2244,134 +2254,7 @@ void Sub(MatrixMetal<T>* _out, MatrixMetal<T>* _L, MatrixMetal<T>* _R)
 }
 
 
-template<TransposeMode Mode = TransposeMode::None, class T>
-void Mul(MatrixMetal<T>* _out,            MatrixMetal<T>* _L,              MatrixMetal<T>* _R,
-         uint32_t         blockSize = 32, uint32_t        numThreads = 12, ThreadPool*    pool = nullptr)
-{
-    (void)blockSize;
-    (void)numThreads;
-    (void)pool;
 
-    const char* shaderName = "mul";
-    if constexpr (Mode == TransposeMode::Left)
-    {
-        shaderName = "mul_transposeleft";
-    }
-    else if constexpr (Mode == TransposeMode::Right)
-    {
-        shaderName = "mul_transposeright";
-    }
-    else if constexpr (Mode == TransposeMode::Both)
-    {
-        shaderName = "mul_transposeboth";
-    }
-    else if constexpr (Mode == TransposeMode::None)
-    {
-        shaderName = "mul";
-    }
-
-    if (!_out || !_L || !_R)
-    {
-        return;
-    }
-
-    MetalManager* manager = _out->m_gInstance ? _out->m_gInstance : MetalManager::Instance();
-    if (!manager)
-    {
-        return;
-    }
-
-    manager->DumpInfoQueueErrors();
-    _out->Unmap();
-    _L->Unmap();
-    _R->Unmap();
-
-    constexpr bool transposeLeft = Mode == TransposeMode::Left || Mode == TransposeMode::Both;
-    constexpr bool transposeRight = Mode == TransposeMode::Right || Mode == TransposeMode::Both;
-    const uint32_t inner = transposeLeft ? _L->GetDimsY() : _L->GetDimsX();
-    const bool tiled = _out->GetDimsX() >= 16u && _out->GetDimsY() >= 16u && inner >= 16u;
-    Obj simdPipeline = tiled ? MetalMatMulSIMDPipeline(manager, _out->GetDimsY(),
-        _out->GetDimsX(), inner) : nullptr;
-    const bool simd = simdPipeline != nullptr;
-    Obj pipeline = simd ? simdPipeline : manager->GetPipeline(tiled ? "mul_tiled" : shaderName);
-    Obj queue = manager->GetQueue();
-    if (!pipeline || !queue)
-    {
-        return;
-    }
-
-    if (!manager->UpdateCachedCBuffer(_out->m_dataHandles.m_cbufferHandle,
-                                      _out->GetDimsX(),
-                                      _out->GetDimsY(),
-                                      _out->GetDimsZ(),
-                                      _out->GetOffset(),
-                                      static_cast<uint32_t>(_out->GetID()))
-        || !manager->UpdateCachedCBuffer(_L->m_dataHandles.m_cbufferHandle,
-                                         _L->GetDimsX(),
-                                         _L->GetDimsY(),
-                                         _L->GetDimsZ(),
-                                         _L->GetOffset(),
-                                         static_cast<uint32_t>(_L->GetID()))
-        || !manager->UpdateCachedCBuffer(_R->m_dataHandles.m_cbufferHandle,
-                                         _R->GetDimsX(),
-                                         _R->GetDimsY(),
-                                         _R->GetDimsZ(),
-                                         _R->GetOffset(),
-                                         static_cast<uint32_t>(_R->GetID())))
-    {
-        return;
-    }
-
-    Obj outBuffer = manager->GetBuffer(_out->m_dataHandles.m_bufferHandle);
-    Obj leftBuffer = manager->GetBuffer(_L->m_dataHandles.m_bufferHandle);
-    Obj rightBuffer = manager->GetBuffer(_R->m_dataHandles.m_bufferHandle);
-    Obj outCBuffer = manager->GetCBuffer(_out->m_dataHandles.m_cbufferHandle);
-    Obj leftCBuffer = manager->GetCBuffer(_L->m_dataHandles.m_cbufferHandle);
-    Obj rightCBuffer = manager->GetCBuffer(_R->m_dataHandles.m_cbufferHandle);
-    if (!outBuffer || !leftBuffer || !rightBuffer || !outCBuffer || !leftCBuffer || !rightCBuffer)
-    {
-        return;
-    }
-
-    Obj commandBuffer = manager->GetCommandBuffer();
-    Obj encoder = manager->GetEncoder();
-    if (!commandBuffer || !encoder)
-    {
-        return;
-    }
-
-    Send<void>(encoder, "setComputePipelineState:", pipeline);
-    Send<void>(encoder, "setBuffer:offset:atIndex:", outBuffer, 0ull, 0ull);
-    Send<void>(encoder, "setBuffer:offset:atIndex:", leftBuffer, 0ull, 1ull);
-    Send<void>(encoder, "setBuffer:offset:atIndex:", rightBuffer, 0ull, 2ull);
-    MetalBindCBuffer(encoder, outCBuffer, 3ull);
-    MetalBindCBuffer(encoder, leftCBuffer, 4ull);
-    MetalBindCBuffer(encoder, rightCBuffer, 5ull);
-    if (tiled)
-    {
-        const uint32_t flags = (transposeLeft ? 1u : 0u) | (transposeRight ? 2u : 0u);
-        Send<void>(encoder, "setBytes:length:atIndex:", &flags, sizeof(flags), 6ull);
-    }
-
-    const uint32_t elementCount = _out->GetElementCount();
-
-    MTLSize threads = {elementCount, 1, 1};
-    MTLSize threadsPerThreadgroup = {256u, 1, 1};
-    if (tiled)
-    {
-        const uint32_t tile = simd ? 32u : 16u;
-        MTLSize groups = {(_out->GetDimsX() + tile - 1u) / tile,
-                          (_out->GetDimsY() + tile - 1u) / tile, _out->GetDimsZ()};
-        MTLSize tileThreads = simd ? MTLSize{128u, 1u, 1u} : MTLSize{16u, 16u, 1u};
-        Send<void>(encoder, "dispatchThreadgroups:threadsPerThreadgroup:", groups, tileThreads);
-    }
-    else
-        Send<void>(encoder, "dispatchThreads:threadsPerThreadgroup:", threads, threadsPerThreadgroup);
-
-    manager->WorkSubmitted();
-    manager->DumpInfoQueueErrors();
-
-}
 
 template<TransposeMode Mode = TransposeMode::None, class T>
 void MatMul_Strided(MatrixMetal<T>* _out,
@@ -2386,6 +2269,9 @@ void MatMul_Strided(MatrixMetal<T>* _out,
                     uint32_t blockSize = 32,
                     uint32_t numThreads = 12,
                     ThreadPool* pool = nullptr,
+                    uint32_t L_channelStride = UINT32_MAX,
+                    uint32_t R_channelStride = UINT32_MAX,
+                    uint32_t outChannelStride = UINT32_MAX,
                     uint32_t L_batchStride = UINT32_MAX,
                     uint32_t R_batchStride = UINT32_MAX,
                     uint32_t outBatchStride = UINT32_MAX)
@@ -2430,10 +2316,10 @@ void MatMul_Strided(MatrixMetal<T>* _out,
 
     constexpr bool transposeLeft = Mode == TransposeMode::Left || Mode == TransposeMode::Both;
     constexpr bool transposeRight = Mode == TransposeMode::Right || Mode == TransposeMode::Both;
-    const uint32_t inner = transposeLeft ? _L->GetDimsY() : _L->GetDimsX();
-    const bool tiled = _out->GetDimsX() >= 16u && _out->GetDimsY() >= 16u && inner >= 16u;
-    Obj simdPipeline = tiled ? MetalMatMulSIMDPipeline(manager, _out->GetDimsY(),
-        _out->GetDimsX(), inner) : nullptr;
+    const uint32_t inner = transposeLeft ? _L->GetHeight() : _L->GetWidth();
+    const bool tiled = _out->GetWidth() >= 16u && _out->GetHeight() >= 16u && inner >= 16u;
+    Obj simdPipeline = tiled ? MetalMatMulSIMDPipeline(manager, _out->GetHeight(),
+        _out->GetWidth(), inner) : nullptr;
     const bool simd = simdPipeline != nullptr;
     Obj pipeline = simd ? simdPipeline : manager->GetPipeline(tiled ? "mul_tiled" : shaderName);
     Obj queue = manager->GetQueue();
@@ -2442,37 +2328,19 @@ void MatMul_Strided(MatrixMetal<T>* _out,
         return;
     }
 
-    if (!manager->UpdateCachedCBuffer(_out->m_dataHandles.m_cbufferHandle,
-                                      _out->GetDimsX(),
-                                      _out->GetDimsY(),
-                                      _out->GetDimsZ(),
-                                      _out->GetOffset(),
-                                      static_cast<uint32_t>(_out->GetID()))
-        || !manager->UpdateCachedCBuffer(_L->m_dataHandles.m_cbufferHandle,
-                                         _L->GetDimsX(),
-                                         _L->GetDimsY(),
-                                         _L->GetDimsZ(),
-                                         _L->GetOffset(),
-                                         static_cast<uint32_t>(_L->GetID()))
-        || !manager->UpdateCachedCBuffer(_R->m_dataHandles.m_cbufferHandle,
-                                         _R->GetDimsX(),
-                                         _R->GetDimsY(),
-                                         _R->GetDimsZ(),
-                                         _R->GetOffset(),
-                                         static_cast<uint32_t>(_R->GetID())))
-    {
-        return;
-    }
+    ValidateMatMulShapes<Mode>(_out,_L,_R);
+    if (!MetalSyncCBuffer(_out) || !MetalSyncCBuffer(_L) || !MetalSyncCBuffer(_R))
+        throw std::runtime_error("Cannot bind batched matrix product.");
 
-    const uint32_t outParams[3] = { outRowStride, outColStride,
-        outBatchStride == UINT32_MAX ? (outRowStride ? outRowStride : _out->GetDimsX()) * _out->GetDimsY() : outBatchStride };
-    const uint32_t leftParams[3] = { L_rowStride, L_colStride,
-        L_batchStride == UINT32_MAX ? (L_rowStride ? L_rowStride : _L->GetDimsX()) * _L->GetDimsY() : L_batchStride };
-    const uint32_t rightParams[3] = { R_rowStride, R_colStride,
-        R_batchStride == UINT32_MAX ? (R_rowStride ? R_rowStride : _R->GetDimsX()) * _R->GetDimsY() : R_batchStride };
-    if (!manager->SetCBufferOptionalParams(_out->m_dataHandles.m_cbufferHandle, outParams, 3u)
-        || !manager->SetCBufferOptionalParams(_L->m_dataHandles.m_cbufferHandle, leftParams, 3u)
-        || !manager->SetCBufferOptionalParams(_R->m_dataHandles.m_cbufferHandle, rightParams, 3u))
+    const uint32_t oc = outChannelStride == UINT32_MAX ? (outRowStride ? outRowStride : _out->GetWidth()) * _out->GetHeight() : outChannelStride;
+    const uint32_t lc = L_channelStride == UINT32_MAX ? (L_rowStride ? L_rowStride : _L->GetWidth()) * _L->GetHeight() : L_channelStride;
+    const uint32_t rc = R_channelStride == UINT32_MAX ? (R_rowStride ? R_rowStride : _R->GetWidth()) * _R->GetHeight() : R_channelStride;
+    const uint32_t outParams[4] = {outRowStride,outColStride,oc,outBatchStride==UINT32_MAX?oc*_out->GetChannelCount():outBatchStride};
+    const uint32_t leftParams[4] = {L_rowStride,L_colStride,lc,L_batchStride==UINT32_MAX?lc*_L->GetChannelCount():L_batchStride};
+    const uint32_t rightParams[4] = {R_rowStride,R_colStride,rc,R_batchStride==UINT32_MAX?rc*_R->GetChannelCount():R_batchStride};
+    if (!manager->SetCBufferOptionalParams(_out->m_dataHandles.m_cbufferHandle, outParams, 4u)
+        || !manager->SetCBufferOptionalParams(_L->m_dataHandles.m_cbufferHandle, leftParams, 4u)
+        || !manager->SetCBufferOptionalParams(_R->m_dataHandles.m_cbufferHandle, rightParams, 4u))
     {
         return;
     }
@@ -2514,8 +2382,8 @@ void MatMul_Strided(MatrixMetal<T>* _out,
     if (tiled)
     {
         const uint32_t tile = simd ? 32u : 16u;
-        MTLSize groups = {(_out->GetDimsX() + tile - 1u) / tile,
-                          (_out->GetDimsY() + tile - 1u) / tile, _out->GetDimsZ()};
+        MTLSize groups = {(_out->GetWidth() + tile - 1u) / tile,
+                          (_out->GetHeight() + tile - 1u) / tile, _out->GetPlaneCount()};
         MTLSize tileThreads = simd ? MTLSize{128u, 1u, 1u} : MTLSize{16u, 16u, 1u};
         Send<void>(encoder, "dispatchThreadgroups:threadsPerThreadgroup:", groups, tileThreads);
     }
@@ -2525,7 +2393,205 @@ void MatMul_Strided(MatrixMetal<T>* _out,
     manager->WorkSubmitted();
     manager->DumpInfoQueueErrors();
 }
+
+template<TransposeMode Mode = TransposeMode::None, class T>
+void Mul(MatrixMetal<T>* _out,            MatrixMetal<T>* _L,              MatrixMetal<T>* _R,
+         uint32_t         blockSize = 32, uint32_t        numThreads = 12, ThreadPool*    pool = nullptr)
+{
+    ValidateMatMulShapes<Mode>(_out,_L,_R);
+    if(_out->GetPlaneCount()>1u || _L->GetPlaneCount()>1u || _R->GetPlaneCount()>1u) {
+        MatMul_Strided<Mode>(_out,_L,_R,_L->GetWidth(),1u,_R->GetWidth(),1u,
+            _out->GetWidth(),1u,blockSize,numThreads,pool);
+        return;
+    }
+
+    (void)blockSize;
+    (void)numThreads;
+    (void)pool;
+
+    const char* shaderName = "mul";
+    if constexpr (Mode == TransposeMode::Left)
+    {
+        shaderName = "mul_transposeleft";
+    }
+    else if constexpr (Mode == TransposeMode::Right)
+    {
+        shaderName = "mul_transposeright";
+    }
+    else if constexpr (Mode == TransposeMode::Both)
+    {
+        shaderName = "mul_transposeboth";
+    }
+    else if constexpr (Mode == TransposeMode::None)
+    {
+        shaderName = "mul";
+    }
+
+    if (!_out || !_L || !_R)
+    {
+        return;
+    }
+
+    MetalManager* manager = _out->m_gInstance ? _out->m_gInstance : MetalManager::Instance();
+    if (!manager)
+    {
+        return;
+    }
+
+    manager->DumpInfoQueueErrors();
+    _out->Unmap();
+    _L->Unmap();
+    _R->Unmap();
+
+    constexpr bool transposeLeft = Mode == TransposeMode::Left || Mode == TransposeMode::Both;
+    constexpr bool transposeRight = Mode == TransposeMode::Right || Mode == TransposeMode::Both;
+    const uint32_t inner = transposeLeft ? _L->GetHeight() : _L->GetWidth();
+    const bool tiled = _out->GetWidth() >= 16u && _out->GetHeight() >= 16u && inner >= 16u;
+    Obj simdPipeline = tiled ? MetalMatMulSIMDPipeline(manager, _out->GetHeight(),
+        _out->GetWidth(), inner) : nullptr;
+    const bool simd = simdPipeline != nullptr;
+    Obj pipeline = simd ? simdPipeline : manager->GetPipeline(tiled ? "mul_tiled" : shaderName);
+    Obj queue = manager->GetQueue();
+    if (!pipeline || !queue)
+    {
+        return;
+    }
+
+    if (!manager->UpdateCachedCBuffer(_out->m_dataHandles.m_cbufferHandle,
+                                      _out->GetWidth(),
+                                      _out->GetHeight(),
+                                      _out->GetPlaneCount(),
+                                      _out->GetOffset(),
+                                      static_cast<uint32_t>(_out->GetID()))
+        || !manager->UpdateCachedCBuffer(_L->m_dataHandles.m_cbufferHandle,
+                                         _L->GetWidth(),
+                                         _L->GetHeight(),
+                                         _L->GetPlaneCount(),
+                                         _L->GetOffset(),
+                                         static_cast<uint32_t>(_L->GetID()))
+        || !manager->UpdateCachedCBuffer(_R->m_dataHandles.m_cbufferHandle,
+                                         _R->GetWidth(),
+                                         _R->GetHeight(),
+                                         _R->GetPlaneCount(),
+                                         _R->GetOffset(),
+                                         static_cast<uint32_t>(_R->GetID())))
+    {
+        return;
+    }
+
+    Obj outBuffer = manager->GetBuffer(_out->m_dataHandles.m_bufferHandle);
+    Obj leftBuffer = manager->GetBuffer(_L->m_dataHandles.m_bufferHandle);
+    Obj rightBuffer = manager->GetBuffer(_R->m_dataHandles.m_bufferHandle);
+    Obj outCBuffer = manager->GetCBuffer(_out->m_dataHandles.m_cbufferHandle);
+    Obj leftCBuffer = manager->GetCBuffer(_L->m_dataHandles.m_cbufferHandle);
+    Obj rightCBuffer = manager->GetCBuffer(_R->m_dataHandles.m_cbufferHandle);
+    if (!outBuffer || !leftBuffer || !rightBuffer || !outCBuffer || !leftCBuffer || !rightCBuffer)
+    {
+        return;
+    }
+
+    Obj commandBuffer = manager->GetCommandBuffer();
+    Obj encoder = manager->GetEncoder();
+    if (!commandBuffer || !encoder)
+    {
+        return;
+    }
+
+    Send<void>(encoder, "setComputePipelineState:", pipeline);
+    Send<void>(encoder, "setBuffer:offset:atIndex:", outBuffer, 0ull, 0ull);
+    Send<void>(encoder, "setBuffer:offset:atIndex:", leftBuffer, 0ull, 1ull);
+    Send<void>(encoder, "setBuffer:offset:atIndex:", rightBuffer, 0ull, 2ull);
+    MetalBindCBuffer(encoder, outCBuffer, 3ull);
+    MetalBindCBuffer(encoder, leftCBuffer, 4ull);
+    MetalBindCBuffer(encoder, rightCBuffer, 5ull);
+    if (tiled)
+    {
+        const uint32_t flags = (transposeLeft ? 1u : 0u) | (transposeRight ? 2u : 0u);
+        Send<void>(encoder, "setBytes:length:atIndex:", &flags, sizeof(flags), 6ull);
+    }
+
+    const uint32_t elementCount = _out->GetElementCount();
+
+    MTLSize threads = {elementCount, 1, 1};
+    MTLSize threadsPerThreadgroup = {256u, 1, 1};
+    if (tiled)
+    {
+        const uint32_t tile = simd ? 32u : 16u;
+        MTLSize groups = {(_out->GetWidth() + tile - 1u) / tile,
+                          (_out->GetHeight() + tile - 1u) / tile, _out->GetPlaneCount()};
+        MTLSize tileThreads = simd ? MTLSize{128u, 1u, 1u} : MTLSize{16u, 16u, 1u};
+        Send<void>(encoder, "dispatchThreadgroups:threadsPerThreadgroup:", groups, tileThreads);
+    }
+    else
+        Send<void>(encoder, "dispatchThreads:threadsPerThreadgroup:", threads, threadsPerThreadgroup);
+
+    manager->WorkSubmitted();
+    manager->DumpInfoQueueErrors();
+
+}
  
+template<class T>
+void MetalConvolutionDispatch(const char* name,MatrixMetal<T>* out,MatrixMetal<T>* input,
+    MatrixMetal<T>* kernel,MatrixMetal<T>* auxiliary,uint32_t count,uint32_t channel,
+    uint32_t stride,uint32_t dilation,uint32_t padding,bool transposed,bool bias)
+{
+    auto* gpu=out->m_gInstance;
+    MatrixMetal<T>* matrices[]={out,input,kernel,auxiliary};
+    for(auto* matrix:matrices) {
+        matrix->Unmap();if(!MetalSyncCBuffer(matrix)) throw std::runtime_error("Cannot bind convolution parameters.");
+    }
+    const uint32_t optional[]={channel,stride,dilation,padding,transposed?1u:0u,bias?1u:0u};
+    gpu->SetCBufferOptionalParams(out->m_dataHandles.m_cbufferHandle,optional,6u);
+    Obj pipeline=gpu->GetPipeline(name),encoder=gpu->GetEncoder();
+    if(!pipeline || !encoder) throw std::runtime_error("Metal convolution pipeline is unavailable.");
+    Send<void>(encoder,"setComputePipelineState:",pipeline);
+    for(uint64_t index=0;index<4;++index) {
+        Send<void>(encoder,"setBuffer:offset:atIndex:",gpu->GetBuffer(matrices[index]->m_dataHandles.m_bufferHandle),0ull,index);
+        MetalBindCBuffer(encoder,gpu->GetCBuffer(matrices[index]->m_dataHandles.m_cbufferHandle),index+4u);
+    }
+    const MTLSize threads={count,1u,1u},group={256u,1u,1u};
+    Send<void>(encoder,"dispatchThreads:threadsPerThreadgroup:",threads,group);gpu->WorkSubmitted();
+}
+
+template<class T>
+void ConvolutionForward(MatrixMetal<T>* output,MatrixMetal<T>* input,MatrixMetal<T>* kernel,
+    MatrixMetal<T>* bias,uint32_t channel,uint32_t stride,uint32_t dilation,uint32_t padding,bool transposed)
+{
+    ValidateConvolution<T>(output,input,kernel,channel,stride,dilation);
+    MetalConvolutionDispatch("convolution_forward",output,input,kernel,bias?bias:kernel,
+        output->GetBatchCount()*output->GetWidth()*output->GetHeight(),channel,stride,dilation,padding,transposed,bias!=nullptr);
+}
+
+template<class T>
+void ConvolutionBackwards(MatrixMetal<T>* error,MatrixMetal<T>* input,MatrixMetal<T>* kernel,
+    MatrixMetal<T>* dw,MatrixMetal<T>* dx,uint32_t channel,uint32_t stride,uint32_t dilation,uint32_t padding,bool transposed)
+{
+    ValidateConvolution<T>(error,input,kernel,channel,stride,dilation);
+    if((dw && dw->GetShape()!=kernel->GetShape()) || (dx && dx->GetShape()!=input->GetShape()))
+        throw std::invalid_argument("Convolution gradient shapes are incorrect.");
+    if(dw) MetalConvolutionDispatch("convolution_weights_backwards",dw,input,kernel,error,
+        dw->GetElementCount(),channel,stride,dilation,padding,transposed,false);
+    if(dx) MetalConvolutionDispatch("convolution_input_backwards",dx,input,kernel,error,
+        dx->GetElementCount(),channel,stride,dilation,padding,transposed,false);
+}
+
+template<class T>
+void Conv2DSingleChannel(MatrixMetal<T>* out,MatrixMetal<T>* input,MatrixMetal<T>* kernel,MatrixMetal<T>* bias,
+    uint32_t c,uint32_t s,uint32_t d,uint32_t p)
+{ ConvolutionForward(out,input,kernel,bias,c,s,d,p,false); }
+template<class T>
+void Conv2DTransposeSingleChannel(MatrixMetal<T>* out,MatrixMetal<T>* input,MatrixMetal<T>* kernel,MatrixMetal<T>* bias,
+    uint32_t c,uint32_t s,uint32_t d,uint32_t p)
+{ ConvolutionForward(out,input,kernel,bias,c,s,d,p,true); }
+template<class T>
+void Conv2DSingleChannelBackwards(MatrixMetal<T>* error,MatrixMetal<T>* input,MatrixMetal<T>* kernel,
+    MatrixMetal<T>* dw,MatrixMetal<T>* dx,uint32_t c,uint32_t s,uint32_t d,uint32_t p)
+{ ConvolutionBackwards(error,input,kernel,dw,dx,c,s,d,p,false); }
+template<class T>
+void Conv2DTransposeSingleChannelBackwards(MatrixMetal<T>* error,MatrixMetal<T>* input,MatrixMetal<T>* kernel,
+    MatrixMetal<T>* dw,MatrixMetal<T>* dx,uint32_t c,uint32_t s,uint32_t d,uint32_t p)
+{ ConvolutionBackwards(error,input,kernel,dw,dx,c,s,d,p,true); }
+
 // All gradient reads, reductions, scale generation and scaling remain queued.
 template<class T>
 void ClipGradientNorm(const std::vector<MatrixMetal<T>*>& gradients, float maximumNorm,

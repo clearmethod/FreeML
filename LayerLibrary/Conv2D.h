@@ -21,7 +21,7 @@ struct ConvSettings
 {
     uint32_t inChannels = 0u;
     uint32_t outChannels = 0u;
-    Dims3D   kernelSize = Dims3D(1u, 1u, 1u);
+    MatrixShape   kernelSize = MatrixShape::Matrix(1u,1u);
     uint32_t stride = 1u;
     uint32_t padding = 0u;
     uint32_t dilation = 1u;
@@ -32,7 +32,7 @@ struct ConvSettings
 template<class T, class Mat = MatrixCPU<T>>
 Datablob<T, Mat>* InitConv2DBlob(   uint32_t       _inChannels,
                                     uint32_t       _outChannels,
-                                    Dims3D         _kernelSize,
+                                    MatrixShape         _kernelSize,
                                     uint32_t       _batchSize       = 1,
                                     uint32_t       _stride          = 1,
                                     uint32_t       _padding         = 0,
@@ -46,29 +46,29 @@ Datablob<T, Mat>* InitConv2DBlob(   uint32_t       _inChannels,
 
     for(uint32_t i = 0; i < _outChannels; ++i)
     {
-        auto kernelWeights = inst.AllocateMatrix({_kernelSize.x, _kernelSize.y, _inChannels}, "kernelWeights" + std::to_string(i));
+        auto kernelWeights = inst.AllocateMatrix(MatrixShape::Image(1u,_inChannels,_kernelSize.width,_kernelSize.height), "kernelWeights" + std::to_string(i));
         blob->Set("KernelWeights_"+std::to_string(i), kernelWeights);
 
         if(_initForTraining)
         {
-            auto wUpdate = inst.AllocateMatrix({_kernelSize.x, _kernelSize.y, _inChannels}, "WUpdate_" + std::to_string(i));
+            auto wUpdate = inst.AllocateMatrix(MatrixShape::Image(1u,_inChannels,_kernelSize.width,_kernelSize.height), "WUpdate_" + std::to_string(i));
             blob->Set("WUpdate_"+std::to_string(i), wUpdate);
         }
     }
 
     if(_useBias)
     {
-        auto bias = inst.AllocateMatrix({_outChannels, _batchSize}, "Bias");
+        auto bias = inst.AllocateMatrix(MatrixShape::Matrix(_outChannels), "Bias");
         blob->Set("Bias", bias);
         if(_initForTraining)
         {
-            auto bUpdate = inst.AllocateMatrix({_outChannels, _batchSize}, "BUpdate");
+            auto bUpdate = inst.AllocateMatrix(MatrixShape::Matrix(_outChannels), "BUpdate");
             blob->Set("BUpdate", bUpdate);
         }
     }
 
-    blob->Set("KernelSizeX", _kernelSize.x);
-    blob->Set("KernelSizeY", _kernelSize.y);
+    blob->Set("KernelSizeX", _kernelSize.width);
+    blob->Set("KernelSizeY", _kernelSize.height);
     blob->Set("InChannels" , _inChannels  );
     blob->Set("OutChannels", _outChannels );
     blob->Set("Batchsize"  , _batchSize   );
@@ -177,10 +177,6 @@ class Conv2D : public Layer<T, Mat>
     {
         typename MatrixManager<T, Mat>::MatrixRef outputRef = _blob->AcquireMatrix("Output_0");
         Mat* output = outputRef.get();
-        if (output)
-        {
-            return;
-        }
 
         typename MatrixManager<T, Mat>::MatrixRef inputRef = _blob->AcquireMatrix("Input_0");
         Mat* input = inputRef.get();
@@ -189,7 +185,7 @@ class Conv2D : public Layer<T, Mat>
             return;
         }
 
-        if (input->GetDimsX() == 0u || input->GetDimsY() == 0u || input->GetDimsZ() == 0u)
+        if (input->GetWidth() == 0u || input->GetHeight() == 0u || input->GetChannelCount() == 0u)
         {
             return;
         }
@@ -211,34 +207,39 @@ class Conv2D : public Layer<T, Mat>
         uint32_t padding     = _blob->GetUInt("Padding");
         uint32_t outChannels = _blob->GetUInt("OutChannels");
 
-        uint32_t outx   = floor((_input->GetDimsX() + 2u*padding - dilation*(kW-1u) - 1u) / stride) + 1u;
-        uint32_t outy   = floor((_input->GetDimsY() + 2u*padding - dilation*(kH-1u) - 1u) / stride) + 1u;
+        if (!stride || !dilation || !kW || !kH)
+            throw std::invalid_argument("Convolution kernel, stride and dilation must be positive.");
+        const auto outputExtent=[&](uint32_t input,uint32_t kernel) {
+            const int64_t available=int64_t(input)+2ll*padding-int64_t(dilation)*(kernel-1u)-1ll;
+            if (available<0 || available/stride+1ll>UINT32_MAX)
+                throw std::invalid_argument("Convolution output dimensions are invalid.");
+            return uint32_t(available/stride+1ll);
+        };
+        const uint32_t outx=outputExtent(_input->GetWidth(),kW);
+        const uint32_t outy=outputExtent(_input->GetHeight(),kH);
 
-        auto outputRef = inst.AllocateMatrix({outx, outy, outChannels}, "Output_0");
-        _blob->Set("Output_0", outputRef);
+        this->EnsureMatrix(_blob,"Output_0",MatrixShape::Image(_input->GetBatchCount(),outChannels,outx,outy));
 
         if constexpr (!kIsIdentity)
         {
-            auto outputPreActivationRef = inst.AllocateMatrix({outx, outy, outChannels}, "OutputPreActivation");
-            _blob->Set("OutputPreActivation", outputPreActivationRef);
+            this->EnsureMatrix(_blob,"OutputPreActivation",MatrixShape::Image(_input->GetBatchCount(),outChannels,outx,outy));
         }
 
         // If we have WUpdate_0, we assume we are training and need to backpropagate error to input
         typename MatrixManager<T, Mat>::MatrixRef wUpdateRef = _blob->AcquireMatrix("WUpdate_0");
         if (wUpdateRef.get() != nullptr)
         {
-            auto errorOut = inst.AllocateMatrix({_input->GetDimsX(), _input->GetDimsY(), _input->GetDimsZ()}, "ErrorOutput_0");
-            _blob->Set("ErrorOutput_0", errorOut);
+            this->EnsureMatrix(_blob,"ErrorOutput_0",_input->GetShape());
             if constexpr (!kIsIdentity)
             {
-                auto deltaRef = inst.AllocateMatrix({outx, outy, outChannels}, "Delta");
-                _blob->Set("Delta", deltaRef);
+                this->EnsureMatrix(_blob,"Delta",MatrixShape::Image(_input->GetBatchCount(),outChannels,outx,outy));
             }
         }
     }
 
     void Forward(Datablob<T, Mat>* _blob) override
     {
+        EnsureOutputsAllocated(_blob);
         typename MatrixManager<T, Mat>::MatrixRef inputRef = _blob->AcquireMatrix("Input_0");
         Mat* input = inputRef.get();
         typename MatrixManager<T, Mat>::MatrixRef outputRef = _blob->AcquireMatrix("Output_0");
@@ -304,6 +305,11 @@ class Conv2D : public Layer<T, Mat>
         if(bUpdate)  
             Clear(bUpdate);
 
+        if(bUpdate) {
+            auto biasChannels=this->CachedView(_blob,"BiasChannels",bUpdateRef,MatrixShape::Image(1u,outChannels,1u,1u));
+            ReduceSum(biasChannels.get(),effectiveError,MatrixAxes::Batch|MatrixAxes::Width|MatrixAxes::Height);
+        }
+
         for(uint32_t oc = 0; oc < outChannels; ++oc)
         {
             typename MatrixManager<T, Mat>::MatrixRef wUpdateRef = _blob->AcquireMatrix("WUpdate_" + std::to_string(oc));
@@ -314,10 +320,7 @@ class Conv2D : public Layer<T, Mat>
                 Clear(wUpdate);
 
             // Calculate Bias Gradient: Sum errorIn over spatial dims
-            if(bUpdate)
-            {
-                SumSpatialDimension(bUpdate, effectiveError, oc, Dims3D(oc, 0u, 0u));
-            }
+
             Conv2DSingleChannelBackwards<T>(effectiveError, input, kernel, wUpdate, errorOut, oc, stride, dilation, padding);
         }
     }

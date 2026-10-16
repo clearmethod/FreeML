@@ -74,7 +74,7 @@ namespace diffusion_example
     inline void FillTimestepConditioning(MatType* mat, uint32_t tIdx, uint32_t totalSteps)
     {
         assert(mat);
-        assert(mat->GetDimsZ() == kTimeConditionChannels);
+        assert(mat->GetPlaneCount() == kTimeConditionChannels);
 
         const float denom = (totalSteps > 1u) ? static_cast<float>(totalSteps - 1u) : 1.0f;
         const float tau = static_cast<float>(tIdx) / denom;
@@ -91,7 +91,7 @@ namespace diffusion_example
         for (uint32_t z = 0; z < kTimeConditionChannels; ++z)
         {
             MatType sliceView;
-            mat->GetSliceZ(&sliceView, z);
+            mat->GetPlaneView(&sliceView, z);
             Fill(&sliceView, values[z]);
         }
     }
@@ -100,9 +100,9 @@ namespace diffusion_example
     template<class MatType>
     inline void GenerateCheckerboard(MatType* mat, uint32_t tileSize)
     {
-        const uint32_t width = mat->GetDimsX();
-        const uint32_t height = mat->GetDimsY();
-        const uint32_t depth = mat->GetDimsZ();
+        const uint32_t width = mat->GetWidth();
+        const uint32_t height = mat->GetHeight();
+        const uint32_t depth = mat->GetPlaneCount();
         for (uint32_t z = 0; z < depth; ++z)
         {
             for (uint32_t y = 0; y < height; ++y)
@@ -237,8 +237,8 @@ namespace diffusion_example
     template<class MatType>
     void PrintMatrixToTerminal(MatType* mat, uint32_t channel = 0u)
     {
-        const uint32_t W = mat->GetDimsX();
-        const uint32_t H = mat->GetDimsY();
+        const uint32_t W = mat->GetWidth();
+        const uint32_t H = mat->GetHeight();
         for (uint32_t y = 0; y < H; ++y)
         {
             std::string row;

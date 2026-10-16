@@ -46,8 +46,8 @@ int main()
     m.Init();
 
     auto& inst = MatrixManager<T, MatType>::Instance();
-    MatrixRef input = inst.AllocateMatrix({4, 1}, "Input");
-    MatrixRef target = inst.AllocateMatrix({4, 1}, "Output");
+    MatrixRef input = inst.AllocateMatrix(MatrixShape::Matrix(4,1), "Input");
+    MatrixRef target = inst.AllocateMatrix(MatrixShape::Matrix(4,1), "Output");
 
     Fill(input.get(), 1.0f);
     Fill(target.get(), 4.0f);

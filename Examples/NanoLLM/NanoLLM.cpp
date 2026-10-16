@@ -23,6 +23,8 @@
 
 #include <ToolsLibrary/Tools.h>
 #include "LearningRateSchedule.h"
+#include "TokenMetrics.h"
+#include <chrono>
 
 #include <MatrixLibrary/MatrixBase_Functions.h>
 #include <MatrixLibrary/CPU/MatrixCPU.h>
@@ -57,12 +59,12 @@ using MatrixRef = typename MatrixManager<T, MatType>::MatrixRef;
 struct NanoLLMConfig
 {
     uint32_t block_size      = 256u; // max context length (sequence length)
-    uint32_t batch_size      = 1u;   // number of sequences per batch
+    uint32_t batch_size      = 8u;   // sequences processed together in one matrix
     uint32_t n_layer         = 6u;   // number of transformer blocks
     uint32_t n_head          = 6u;   // number of attention heads per block
     uint32_t n_embed         = 384u; // embedding/hidden dimension
     uint32_t iter_count      = 500000u; // optimizer updates per training cycle
-    uint32_t gradient_accumulation_steps = 64u; // sampled sequences per optimizer update
+    uint32_t gradient_accumulation_steps = 8u; // physical batches per update; 8 * 8 = 64 sequences
     float    dropout         = 0.2f;
     float    learning_rate   = 0.001f; // peak rate after warmup
     float    minimum_learning_rate = 0.0001f;
@@ -115,11 +117,6 @@ static bool ValidateConfig(const NanoLLMConfig& cfg)
     {
         LOG_ERROR() << "Invalid learning-rate schedule: require finite rates, "
                     << "0 < minimum <= peak, and decay_updates > warmup_updates.";
-        ok = false;
-    }
-    if (cfg.batch_size != 1u)
-    {
-        LOG_ERROR() << "Invalid config: NanoLLM currently supports batch_size == 1 only.";
         ok = false;
     }
     assert(cfg.n_head != 0u && (cfg.n_embed % cfg.n_head) == 0u);
@@ -199,93 +196,6 @@ std::vector<char> decode(std::vector<uint32_t> _data, std::map<uint32_t, char>& 
     return out;
 }
 
-std::string DecodeMatrixTokens(MatType* mat, const std::vector<char>& uintToChar)
-{
-    if (!mat)
-        return {};
-
-    const uint32_t steps = mat->GetDimsY();
-    const uint32_t cols  = mat->GetDimsX();
-    std::string decoded;
-    decoded.reserve(steps);
-
-    const T* data = mat->DataRead();
-    if (cols == 1u)
-    {
-        for (uint32_t t = 0u; t < steps; ++t)
-        {
-            const uint32_t idx = static_cast<uint32_t>(data[t]);
-            decoded.push_back(idx < uintToChar.size() ? uintToChar[idx] : '?');
-        }
-        return decoded;
-    }
-
-    for (uint32_t t = 0u; t < steps; ++t)
-    {
-        const T* row = data + (t * cols);
-        uint32_t bestIdx = 0u;
-        T bestVal = row[0];
-        for (uint32_t v = 1u; v < cols; ++v)
-        {
-            const T val = row[v];
-            if (val > bestVal)
-            {
-                bestVal = val;
-                bestIdx = v;
-            }
-        }
-        decoded.push_back(bestIdx < uintToChar.size() ? uintToChar[bestIdx] : '?');
-    }
-    return decoded;
-}
-
-std::string DecodeMatrixTokensBatch(MatType* mat, const std::vector<char>& uintToChar, uint32_t batchIndex)
-{
-    if (!mat)
-    {
-        return {};
-    }
-
-    if (mat->GetDimsZ() <= 1u)
-    {
-        return DecodeMatrixTokens(mat, uintToChar);
-    }
-
-    MatType slice;
-    mat->GetSliceZ(&slice, batchIndex);
-    return DecodeMatrixTokens(&slice, uintToChar);
-}
-
-
-static uint32_t CountCorrectTokensBatch(MatType* outputBatchView,
-                                        MatType* target,
-                                        uint32_t blockSize,
-                                        uint32_t vocabSize,
-                                        uint32_t batchIndex)
-{
-    uint32_t correct = 0u;
-    for (uint32_t t = 0; t < blockSize; ++t)
-    {
-        const uint32_t targetToken = static_cast<uint32_t>(target->GetValue(0u, t, batchIndex));
-        uint32_t bestIdx = 0u;
-        T bestVal = outputBatchView->GetValue(0u, t, 0u);
-        for (uint32_t v = 1u; v < vocabSize; ++v)
-        {
-            const T val = outputBatchView->GetValue(v, t, 0u);
-            if (val > bestVal)
-            {
-                bestVal = val;
-                bestIdx = v;
-            }
-        }
-        if (bestIdx == targetToken)
-        {
-            ++correct;
-        }
-    }
-    return correct;
-}
-
 static std::unique_ptr<Model<T, MatType>> BuildOrLoadModel(const NanoLLMConfig& cfg,
                                                                    const Vocab& vocab,
                                                                    MatrixManager<T, MatType>& inst)
@@ -352,17 +262,10 @@ static std::unique_ptr<Model<T, MatType>> BuildOrLoadModel(const NanoLLMConfig& 
         model->AddLayer(finalLayerNorm, finalLayerNorm_blob);
         model->AddDependency(finalLayerNorm, 0, blocks.back(), 0);
 
-        // Init: Flatten output
-        auto* finalFlatten      = new FlattenCopyLayer<T, MatType>();
-        finalFlatten->SetName("ln_f_flatten");
-        auto* finalFlatten_blob = InitFlattenCopyBlob<T, MatType>(true);
-        model->AddLayer(finalFlatten, finalFlatten_blob);
-        model->AddDependency(finalFlatten, 0, finalLayerNorm, 0);
-
         // Init final dense layer
         auto* finalDense      = new Dense<T, Identity<T>, MatType, true>();
         finalDense->SetName("lm_head");
-        auto* finalDense_blob = InitDenseBlob<T, MatType>(vocab_size, cfg.n_embed, cfg.block_size * cfg.batch_size, true, true, cfg.use_bias, true);
+        auto* finalDense_blob = InitDenseBlob<T, MatType>(vocab_size, cfg.n_embed, cfg.block_size, true, true, cfg.use_bias, true);
 
         // Tie embedding and final dense weights.
         MatType* finalDense_blobWeight      = finalDense_blob->GetMatrix<MatType>("Dense_Weights");
@@ -379,7 +282,7 @@ static std::unique_ptr<Model<T, MatType>> BuildOrLoadModel(const NanoLLMConfig& 
         }
 
         model->AddLayer(finalDense, finalDense_blob);
-        model->AddDependency(finalDense, 0, finalFlatten, 0);
+        model->AddDependency(finalDense, 0, finalLayerNorm, 0);
         model->SetFinalOutputLayer(finalDense);
 
         const float weightDecay = 0.01f;
@@ -387,12 +290,13 @@ static std::unique_ptr<Model<T, MatType>> BuildOrLoadModel(const NanoLLMConfig& 
         model->SetOptimiser(adamopt);
         model->SetLoss(new CategoricalCrossEntropyWithLogits<T, MatType>());
 
-        model->SetExpectedInputDims({1u, cfg.block_size, cfg.batch_size});
+        model->SetExpectedInputDims(MatrixShape::Sequence(cfg.batch_size,1u,cfg.block_size));
         model->SetName(cfg.model_name);
         model->Init();
     }
     else
     {
+        model->SetExpectedInputDims(MatrixShape::Sequence(cfg.batch_size,1u,cfg.block_size));
         model->Init();
         PressAnyKeyToContinue();
 
@@ -422,11 +326,10 @@ static TrainingMatrices AllocateTrainingMatrices(Model<T, MatType>* model,
                                                MatrixManager<T, MatType>& inst)
 {
     TrainingMatrices tensors;
-    tensors.posInput = inst.AllocateMatrix({1u, cfg.block_size, 1u}, "Pos_Input");
-    for (uint32_t t = 0; t < cfg.block_size; ++t)
-    {
-        tensors.posInput->SetValue(0u, t, 0u, static_cast<T>(t));
-    }
+    tensors.posInput = inst.AllocateMatrix(MatrixShape::Sequence(cfg.batch_size,1u,cfg.block_size), "Pos_Input");
+    for (uint32_t batch=0;batch<cfg.batch_size;++batch)
+        for (uint32_t t=0;t<cfg.block_size;++t)
+            tensors.posInput->SetValue(batch,0u,0u,t,static_cast<T>(t));
 
     auto* emebeddingPos      = model->GetLayer("embedding_pos");
     auto* emebeddingPos_blob = model->GetLayerBlob("embedding_pos");
@@ -451,7 +354,7 @@ static void TrainLoop(Model<T, MatType>*            model,
     }
 
     // Preload full corpus once and copy sampled windows into dedicated train buffers.
-    auto corpusRef = inst.AllocateMatrix({1u, static_cast<uint32_t>(uint32Data.size()), 1u}, "Corpus_Tokens");
+    auto corpusRef = inst.AllocateMatrix(MatrixShape::Matrix(1u,static_cast<uint32_t>(uint32Data.size())), "Corpus_Tokens");
     MatType* corpus = corpusRef.get();
     assert(corpus);
     T* corpusPtr = corpus->DataWrite();
@@ -460,8 +363,8 @@ static void TrainLoop(Model<T, MatType>*            model,
         corpusPtr[i] = static_cast<T>(uint32Data[i]);
     }
 
-    auto inputBufferRef  = inst.AllocateMatrix({1u, cfg.block_size, 1u}, "Input_Buffer");
-    auto targetBufferRef = inst.AllocateMatrix({1u, cfg.block_size, 1u}, "Target_Buffer");
+    auto inputBufferRef  = inst.AllocateMatrix(MatrixShape::Sequence(cfg.batch_size,1u,cfg.block_size), "Input_Buffer");
+    auto targetBufferRef = inst.AllocateMatrix(MatrixShape::Sequence(cfg.batch_size,1u,cfg.block_size), "Target_Buffer");
     MatType* inputBuffer = inputBufferRef.get();
     MatType* targetBuffer = targetBufferRef.get();
     assert(inputBuffer);
@@ -472,7 +375,7 @@ static void TrainLoop(Model<T, MatType>*            model,
     std::mt19937 rng(std::random_device{}());
     std::uniform_int_distribution<uint32_t> startDist(0u, maxStart);
 
-    model->SetTimingSynchronization(false);
+    model->SetTimingSynchronization(cfg.sync_layer_timings);
 
     auto* adam = dynamic_cast<AdamWOptimiser<T, MatType>*>(model->GetOptimiser());
     if (!adam)
@@ -487,20 +390,29 @@ static void TrainLoop(Model<T, MatType>*            model,
     LOG_INFO() << "Resuming learning-rate schedule after " << update << " optimizer updates.";
 
     model->SetRollingLossWindow(100u);
+    const uint64_t sequencesPerUpdate=uint64_t(cfg.batch_size)*cfg.gradient_accumulation_steps;
+    LOG_INFO() << "Training with " << cfg.batch_size << " sequences per physical batch, "
+               << cfg.gradient_accumulation_steps << " accumulation steps, "
+               << sequencesPerUpdate << " sequences (" << sequencesPerUpdate*cfg.block_size
+               << " tokens) per optimizer update.";
 
     // Loop forever training.
     while(true)
     {
         for(uint32_t i = 0; i < cfg.iter_count; i++)
         {
+            const auto updateStart=std::chrono::steady_clock::now();
             const float learningRate = schedule.AtUpdate(update);
             adam->SetLearningRate(learningRate);
             model->BeginLossBatch();
             for (uint32_t pass = 0; pass < cfg.gradient_accumulation_steps; ++pass)
             {
-                const uint32_t start = (maxStart == 0u ? 0u : startDist(rng));
-                CopyRange(inputBuffer, corpus, 0u, start, cfg.block_size);
-                CopyRange(targetBuffer, corpus, 0u, start + 1u, cfg.block_size);
+                for (uint32_t batch=0;batch<cfg.batch_size;++batch)
+                {
+                    const uint32_t start = (maxStart == 0u ? 0u : startDist(rng));
+                    CopyRange(inputBuffer, corpus, batch*cfg.block_size, start, cfg.block_size);
+                    CopyRange(targetBuffer, corpus, batch*cfg.block_size, start+1u, cfg.block_size);
+                }
                 model->Run(inputBuffer, targetBuffer);
             }
             ++update;
@@ -508,10 +420,14 @@ static void TrainLoop(Model<T, MatType>*            model,
             // Read once, after every backward pass and the optimizer update
             // have been recorded. Every sequence has the same token count.
             const double batchLoss = model->EndLossBatch();
+            const double updateSeconds=std::chrono::duration<double>(
+                std::chrono::steady_clock::now()-updateStart).count();
 
             LOG_INFO() << "Iteration: " << i << " Optimizer updates: " << update
                        << " LR: " << learningRate << " Loss: " << batchLoss
-                       << " Rolling loss: " << model->GetRollingLoss();
+                       << " Rolling loss: " << model->GetRollingLoss()
+                       << " Update(ms): " << updateSeconds*1000.0
+                       << " Tokens/s: " << double(sequencesPerUpdate*cfg.block_size)/updateSeconds;
             // Save after a complete optimizer update.
             if (i % cfg.save_interval == 0 && i > 0u)
             {
@@ -526,32 +442,25 @@ static void TrainLoop(Model<T, MatType>*            model,
                 if (output)
                 {
                     double lastRunTime = model->GetLastRunTime_Seconds();
-                    LOG_INFO() << "Last run time (s): " << lastRunTime;
+                    LOG_INFO() << (cfg.sync_layer_timings ? "Last microbatch time (s): " : "Last microbatch CPU call time (s): ") << lastRunTime;
 
                     // Dump Memory Information
                     LOG_INFO() << inst.GetString();
 
-                    // Output a sample and accuracy for each batch.
+                    // Display the first sample in the physical batch.
                     float meanacc = 0.f;
                     static std::deque<float> accuracyHistory;
-                    const std::string decodedIn = DecodeMatrixTokens(inputBuffer, vocab.unique);
+                    const std::string decodedIn = NanoLLM::DecodeTokenBatch(inputBuffer, vocab.unique,0u);
                     LOG_INFO() << "Decoded input batch 0: \n" << decodedIn;
-                    const std::string decodedTarget = DecodeMatrixTokens(targetBuffer, vocab.unique);
+                    const std::string decodedTarget = NanoLLM::DecodeTokenBatch(targetBuffer, vocab.unique,0u);
                     LOG_INFO() << "Decoded target batch 0: \n" << decodedTarget;
-                    MatType outputBatchView;
-                    output->GetSliceZ(&outputBatchView, 0u);
-                    const std::string decodedOut = DecodeMatrixTokens(&outputBatchView, vocab.unique);
+                    const std::string decodedOut = NanoLLM::DecodeTokenBatch(output,vocab.unique);
                     LOG_INFO() << "Decoded output batch 0: \n" << Tools::Logger::Colour(128, 255, 225) << decodedOut << Tools::Logger::ClearColour();
 
                     // Quick accuracy check against targets.
-                    const uint32_t vocabSize = output->GetDimsX();
-                    uint32_t correct = CountCorrectTokensBatch(&outputBatchView,
-                                                               targetBuffer,
-                                                               cfg.block_size,
-                                                               vocabSize,
-                                                               0u);
-                    const float acc = static_cast<float>(correct) / static_cast<float>(cfg.block_size);
-                    LOG_INFO() << "Batch 0 token accuracy: " << acc;
+                    const uint64_t correct=NanoLLM::CountCorrectTokens(output,targetBuffer);
+                    const float acc=static_cast<float>(correct)/static_cast<float>(uint64_t(cfg.block_size)*cfg.batch_size);
+                    LOG_INFO() << "Batch mean token accuracy: " << acc;
                     accuracyHistory.push_back(acc);
                     if (accuracyHistory.size() > 200)
                         accuracyHistory.pop_front();
@@ -585,59 +494,11 @@ int main()
 
     // LOAD Model
     /////////////////////////
-    /*
-        Model: NanoLLM
-            1  : embedding_token[Embedding]
-            2  : embedding_pos[Embedding]
-            3  : token_pos_add[AddLayer]
-            4  : embedding_dropout[DropoutLayer]
-            4+1: block_0[TransformerBlock]
-            ...
-            4+n: block_{n-1}[TransformerBlock]
-            5+n: ln_f[LayerNorm]
-            6+n: ln_f_flatten[FlattenCopy]
-            7+n: lm_head[Dense]
-    */
-    /////////////////////////
-    /* // With Dimensions: Note this codebase is ROW-MAJOR.
-        Model: NanoLLM
-        1 : embedding_token[Embedding]
-        in : [1, block_size, batch_size]         // token IDs
-        out : [n_embed, block_size, batch_size]
-
-        2 : embedding_pos[Embedding]
-        in : [1, block_size, batch_size]         // position IDs
-        out : [n_embed, block_size, batch_size]
-
-        3 : token_pos_add[AddLayer]
-        in : [n_embed, block_size, batch_size] + [n_embed, block_size, batch_size]
-        out : [n_embed, block_size, batch_size]
-
-        4 : embedding_dropout[DropoutLayer]
-        in : [n_embed, block_size, batch_size]
-        out : [n_embed, block_size, batch_size]
-
-        4 + 1 : block_0[TransformerBlock]
-        in : [n_embed, block_size, batch_size]
-        out : [n_embed, block_size, batch_size]
-
-        ...
-        4 + n : block_{ n - 1 } [TransformerBlock]
-        in : [n_embed, block_size, batch_size]
-        out : [n_embed, block_size, batch_size]
-
-        5 + n : ln_f[LayerNorm]
-        in : [n_embed, block_size, batch_size]
-        out : [n_embed, block_size, batch_size]
-
-        6 + n : ln_f_flatten[FlattenCopy]
-        in : [n_embed, block_size, batch_size]
-        out : [n_embed, block_size * batch_size, 1]
-
-        7 + n : lm_head[Dense]
-        in : [n_embed, block_size * batch_size, 1]
-        out : [vocab_size, block_size * batch_size, 1]
-    */
+    // Row-major tensors use [batch, channels, width, height].
+    // Tokens/positions: [B,1,1,T]; embedding and transformer: [B,1,C,T];
+    // vocabulary logits: [B,1,vocab,T]. Dense flattens B*T rows internally.
+    // The graph is embedding_token + embedding_pos -> dropout -> blocks
+    // -> final LayerNorm -> lm_head, without a flatten layer.
 
     auto model = BuildOrLoadModel(cfg, vocab, inst);
 

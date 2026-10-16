@@ -35,20 +35,20 @@ Datablob<T, Mat>* InitDenseBlob(     uint32_t       _dimsX,
 
     const uint32_t weightX = _transposeWeights ? _dimsY : _dimsX;
     const uint32_t weightY = _transposeWeights ? _dimsX : _dimsY;
-    auto weights = inst.AllocateMatrix({weightX, weightY}, "Dense_Weights");
+    auto weights = inst.AllocateMatrix(MatrixShape::Matrix(weightX,weightY), "Dense_Weights");
     assert(weights.get());
     blob->Set("Dense_Weights", weights);
     blob->Set("Dense_Transposed", _transposeWeights ? 1u : 0u);
     
     if(_useBias)
     {
-        auto bias = inst.AllocateMatrix({_dimsX, 1u}, "bias");
+        auto bias = inst.AllocateMatrix(MatrixShape::Matrix(_dimsX,1u), "bias");
         assert(bias.get());
         blob->Set("Dense_Bias", bias);
     }
 
-    auto output                = inst.AllocateMatrix({_dimsX , _batchSize}, "Dense_Output");
-    auto outputPreActivation   = inst.AllocateMatrix({_dimsX , _batchSize}, "Dense_OutputPreActivation");
+    auto output                = inst.AllocateMatrix(MatrixShape::Matrix(_dimsX,_batchSize), "Dense_Output");
+    auto outputPreActivation   = inst.AllocateMatrix(MatrixShape::Matrix(_dimsX,_batchSize), "Dense_OutputPreActivation");
     assert(output);
     assert(outputPreActivation);
 
@@ -57,14 +57,14 @@ Datablob<T, Mat>* InitDenseBlob(     uint32_t       _dimsX,
 
     if(_initForTraining)
     {
-        auto linearOut             = inst.AllocateMatrix({_dimsX , _batchSize}, "Dense_LinearOut");
-        auto delta                 = inst.AllocateMatrix({_dimsX , _batchSize}, "Dense_Delta");
-        auto wUpdate               = inst.AllocateMatrix({weightX, weightY}   , "Dense_WUpdate");
-        auto errorOut              = inst.AllocateMatrix({_dimsY , _batchSize}, "Dense_ErrorOut");
+        auto linearOut             = inst.AllocateMatrix(MatrixShape::Matrix(_dimsX,_batchSize), "Dense_LinearOut");
+        auto delta                 = inst.AllocateMatrix(MatrixShape::Matrix(_dimsX,_batchSize), "Dense_Delta");
+        auto wUpdate               = inst.AllocateMatrix(MatrixShape::Matrix(weightX,weightY)   , "Dense_WUpdate");
+        auto errorOut              = inst.AllocateMatrix(MatrixShape::Matrix(_dimsY,_batchSize), "Dense_ErrorOut");
 
         if(_useBias)
         {   
-            auto bUpdate               = inst.AllocateMatrix({_dimsX , 1u}, "Dense_BUpdate");
+            auto bUpdate               = inst.AllocateMatrix(MatrixShape::Matrix(_dimsX,1u), "Dense_BUpdate");
             blob->Set("Dense_BUpdate"  , bUpdate);
         }
 
@@ -143,22 +143,22 @@ class Dense : public Layer<T, Mat>
 		return &this->m_gradientMatrices;
     }
 
-    Dims3D GetWeightDims(Datablob<T, Mat>* _blob) const
+    MatrixShape GetWeightDims(Datablob<T,Mat>* _blob) const
     {
         if (!_blob)
         {
-            return Dims3D();
+            return MatrixShape();
         }
         Mat* weights = _blob->GetMatrix("Dense_Weights");
         if (!weights)
         {
-            return Dims3D();
+            return MatrixShape();
         }
         if constexpr (TransposedWeights)
         {
-            return Dims3D(weights->GetDimsY(), weights->GetDimsX(), weights->GetDimsZ());
+            return MatrixShape::Image(1u,weights->GetPlaneCount(),weights->GetHeight(),weights->GetWidth());
         }
-        return weights->GetDims();
+        return weights->GetShape();
     }
 
     uint32_t GetOutputErrorCount() override
@@ -182,8 +182,26 @@ class Dense : public Layer<T, Mat>
         return a.Name();
     }
 
+    void EnsureOutputsAllocated(Datablob<T,Mat>* blob) override
+    {
+        Mat* input=blob->GetMatrix("Input_0");
+        if (!input) return;
+        const auto weights=GetWeightDims(blob);
+        if (input->GetChannelCount()!=1u || input->GetWidth()!=weights.height)
+            throw std::invalid_argument("Dense expects sequence features matching its shared weights.");
+        const auto shape=MatrixShape::Sequence(input->GetBatchCount(),weights.width,input->GetHeight());
+        this->EnsureMatrix(blob,"Output_0",shape);
+        this->EnsureMatrix(blob,"Dense_OutputPreActivation",shape);
+        if (blob->GetMatrix("Dense_WUpdate")) {
+            this->EnsureMatrix(blob,"Dense_LinearOut",shape);
+            this->EnsureMatrix(blob,"Dense_Delta",shape);
+            this->EnsureMatrix(blob,"ErrorOutput_0",input->GetShape());
+        }
+    }
+
     void Forward(Datablob<T, Mat>* _blob)  override
     {
+        EnsureOutputsAllocated(_blob);
         // Get the input
         typename MatrixManager<T, Mat>::MatrixRef inputRef = _blob->AcquireMatrix("Input_0");
         Mat* input = inputRef.get();
@@ -199,6 +217,10 @@ class Dense : public Layer<T, Mat>
         Mat* output = outputRef.get();
 
         Mat* linearOut = kIsIdentity ? output : outputPreActivation;
+        const uint32_t rows=input->GetHeight()*input->GetBatchCount();
+        auto inputRows=this->CachedView(_blob,"InputRows",inputRef,MatrixShape::Matrix(input->GetWidth(),rows));
+        auto outputRows=this->CachedView(_blob,"OutputRows",kIsIdentity ? outputRef : outputPreActivationRef,
+                                          MatrixShape::Matrix(linearOut->GetWidth(),rows));
         
         // Transposing the matrix to get better cache behaviour can help
         // so we have an option to initalise the weights as "transposed"
@@ -206,11 +228,11 @@ class Dense : public Layer<T, Mat>
         // transposed in the mul.
         if constexpr (TransposedWeights)
         {
-            Mul<TransposeMode::Right>(linearOut, input, weights);
+            Mul<TransposeMode::Right>(outputRows.get(), inputRows.get(), weights);
         }
         else
         {
-            Mul<TransposeMode::None>(linearOut, input, weights);
+            Mul<TransposeMode::None>(outputRows.get(), inputRows.get(), weights);
         }
 
         // Apply the bias if we are using it.
@@ -265,23 +287,27 @@ class Dense : public Layer<T, Mat>
 		    act.derivativeMat(linearOut, outputPreActivation, output);
             PerElementMul(delta, error, linearOut);
         }
+        const uint32_t rows=lastInput->GetHeight()*lastInput->GetBatchCount();
+        auto inputRows=this->CachedView(_blob,"InputRows",lastInputRef,MatrixShape::Matrix(lastInput->GetWidth(),rows));
+        auto deltaRows=this->CachedView(_blob,"DeltaRows",deltaRef,MatrixShape::Matrix(delta->GetWidth(),rows));
+        auto errorRows=this->CachedView(_blob,"ErrorRows",errorOutRef,MatrixShape::Matrix(errorOut->GetWidth(),rows));
         if constexpr (TransposedWeights)
         {
-            Mul<TransposeMode::Left, T>(wUpdate, delta, lastInput);
+            Mul<TransposeMode::Left, T>(wUpdate, deltaRows.get(), inputRows.get());
             if (bUpdate != nullptr)
             {
-                SumColumns(bUpdate, delta);
+                ReduceSum(bUpdate,delta,MatrixAxes::Batch|MatrixAxes::Height);
             }
-            Mul<TransposeMode::None, T>(errorOut, delta, weights);
+            Mul<TransposeMode::None, T>(errorRows.get(), deltaRows.get(), weights);
         }
         else
         {
-            Mul<TransposeMode::Left, T>(wUpdate, lastInput, delta);
+            Mul<TransposeMode::Left, T>(wUpdate, inputRows.get(), deltaRows.get());
             if (bUpdate != nullptr)
             {
-                SumColumns(bUpdate, delta);
+                ReduceSum(bUpdate,delta,MatrixAxes::Batch|MatrixAxes::Height);
             }
-            Mul<TransposeMode::Right, T>(errorOut, delta, weights);
+            Mul<TransposeMode::Right, T>(errorRows.get(), deltaRows.get(), weights);
         }
     }
 };

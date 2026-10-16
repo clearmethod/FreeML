@@ -1,7 +1,7 @@
 cbuffer MatOut_Params : register(b0)
 {
     uint out_dimx, out_dimy, out_dimz, out_offset;
-    uint out_uniqueId, out_pad0, out_pad1, out_pad2;
+    uint out_uniqueId, out_channels, out_batch, out_reserved;
     uint4 out_optionalParams[4]; // [0].x = probability bits, [0].y = seed
 };
 RWStructuredBuffer<float> MatOut : register(u0);

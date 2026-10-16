@@ -5,9 +5,9 @@ cbuffer MatOut_Params : register(b0)
     uint out_dimz;
     uint out_offset;
     uint out_uniqueId;
-    uint out_pad0;
-    uint out_pad1;
-    uint out_pad2;
+    uint out_channels;
+    uint out_batch;
+    uint out_reserved;
     uint4 out_optionalParams[4];
 };
 
@@ -18,9 +18,9 @@ cbuffer MatTarget_Params : register(b1)
     uint target_dimz;
     uint target_offset;
     uint target_uniqueId;
-    uint target_pad0;
-    uint target_pad1;
-    uint target_pad2;
+    uint target_channels;
+    uint target_batch;
+    uint target_reserved;
     uint4 target_optionalParams[4];
 };
 
@@ -31,9 +31,9 @@ cbuffer MatLogits_Params : register(b2)
     uint logits_dimz;
     uint logits_offset;
     uint logits_uniqueId;
-    uint logits_pad0;
-    uint logits_pad1;
-    uint logits_pad2;
+    uint logits_channels;
+    uint logits_batch;
+    uint logits_reserved;
     uint4 logits_optionalParams[4];
 };
 

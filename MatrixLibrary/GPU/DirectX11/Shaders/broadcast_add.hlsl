@@ -5,9 +5,9 @@ cbuffer MatOut_Params : register(b0)
     uint out_dimz;
     uint out_offset;
     uint out_uniqueId;
-    uint out_pad0;
-    uint out_pad1;
-    uint out_pad2;
+    uint out_channels;
+    uint out_batch;
+    uint out_reserved;
 };
 
 cbuffer MatBias_Params : register(b1)
@@ -17,9 +17,9 @@ cbuffer MatBias_Params : register(b1)
     uint bias_dimz;
     uint bias_offset;
     uint bias_uniqueId;
-    uint bias_pad0;
-    uint bias_pad1;
-    uint bias_pad2;
+    uint bias_channels;
+    uint bias_batch;
+    uint bias_reserved;
 };
 
 RWStructuredBuffer<float> MatOut : register(u0);

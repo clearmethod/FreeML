@@ -4,7 +4,7 @@ using namespace metal;
 struct MatrixParams
 {
     uint dimx, dimy, dimz, offset, uniqueId;
-    uint pad0, pad1, pad2;
+    uint channels, batch, reserved;
     uint optionalParams[16];
 };
 

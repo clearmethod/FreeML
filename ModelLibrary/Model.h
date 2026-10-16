@@ -260,7 +260,7 @@ class Model
         std::vector<ModelGuideLayer> layers;
         std::filesystem::path optimiser;
         std::filesystem::path loss;
-        Dims3D expectedInputDims = Dims3D(0u, 0u, 0u);
+        MatrixShape expectedInputDims = MatrixShape::Image(1u,0u,0u,0u);
         bool hasExpectedInputDims = false;
     };
 
@@ -364,7 +364,7 @@ class Model
                         const std::vector<Layer<T, Mat>*>& layers,
                         const std::string& lossFile,
                         const std::string& optFile,
-                        const Dims3D& expectedInputDims) const
+                        const MatrixShape& expectedInputDims) const
     {
         const std::string guideFile = "model.guide";
         std::ofstream out(guideFile, std::ios::out);
@@ -391,8 +391,8 @@ class Model
             out << "LAYER " << layer->m_guid << " " << layerFiles[i] << "\n";
         }
 
-        out << "INPUT_DIMS " << expectedInputDims.x << " "
-            << expectedInputDims.y << " " << expectedInputDims.z << "\n";
+        out << "INPUT_DIMS " << expectedInputDims.batch << " " << expectedInputDims.channels << " "
+            << expectedInputDims.width << " " << expectedInputDims.height << "\n";
         out << "OPTIMISER " << (optFile.empty() ? "0" : optFile) << " 0\n";
         out << "LOSSFUNC " << (lossFile.empty() ? "0" : lossFile) << " 0\n";
         return true;
@@ -473,12 +473,13 @@ class Model
                 uint32_t x = 0u;
                 uint32_t y = 0u;
                 uint32_t z = 0u;
-                if (!(ss >> x >> y >> z))
+                uint32_t b = 0u;
+                if (!(ss >> b >> z >> x >> y))
                 {
                     LOG_WARNING() << "Model::LoadModelGuide: failed to parse INPUT_DIMS line: " << line;
                     continue;
                 }
-                guide.expectedInputDims = Dims3D(x, y, z);
+                guide.expectedInputDims = MatrixShape(b, z, x, y);
                 guide.hasExpectedInputDims = true;
                 continue;
             }
@@ -508,8 +509,9 @@ class Model
         {
             LOG_INFO() << "Allocating input skeleton matrix.";
             m_inputMatrix = inst.GetSkeleton();
-            m_inputMatrix->SetDims(m_expectedInputDims);
+            m_inputMatrix->SetShape(m_expectedInputDims);
         }
+        m_inputMatrix->SetShape(m_expectedInputDims);
 
         // Link all the forward dependencies together and ensure outputs are allocated.
         for (auto* layer : m_executionOrder)
@@ -554,12 +556,8 @@ class Model
                     layer->SetInput(blob, m_inputMatrix, 0);
                 }
             }
-        }
-
-        // With inputs now set, allocate dependent matrices
-        for (auto* layer : m_executionOrder)
-        {
-            Datablob<T, Mat>* blob = m_layersAndBlobs[layer];
+            // Allocate before wiring consumers: resizing can replace an output
+            // matrix, so a separate allocation pass would leave stale links.
             layer->EnsureOutputsAllocated(blob);
         }
 
@@ -571,7 +569,7 @@ class Model
         }
 
         assert(finalOutputMat);
-        m_outputErrorMatrix = inst.AllocateMatrix(finalOutputMat->GetDims(), "ModelOutput_Error");
+        m_outputErrorMatrix = inst.AllocateMatrix(finalOutputMat->GetShape(), "ModelOutput_Error");
         m_layersAndBlobs[m_finalOutput]->Set(m_finalOutput->GetErrorInputName(), m_outputErrorMatrix);
 
         // Link all the backwards dependencies together
@@ -683,6 +681,8 @@ class Model
         LOG_INFO() << "Timing summary for model: " << m_name;
         LOG_INFO() << (m_syncLayerTimings ? "Layer timing: GPU completion included."
                                          : "Layer timing: asynchronous calls; GPU waits may be charged to later layers.");
+        if (!m_syncLayerTimings && m_timingsOther.contains("Batch Loss"))
+            LOG_INFO() << "Batch Loss includes waiting for all queued training work in the loss batch.";
         LOG_INFOF("%-*s  %12s %12s %6s  %12s %12s %6s",
                   static_cast<int>(maxNameLen), "Layer",
                   "FwdAvg(ms)", "FwdLast(ms)", "FwdN",
@@ -797,6 +797,8 @@ class Model
 
     void Run(Mat* _input, Mat* _target, bool storeLoss = false)
     {
+        if (_input && m_inputMatrix && _input->GetShape()!=m_expectedInputDims)
+            throw std::invalid_argument("Model input shape differs from its initialized shape. SetExpectedInputDims and Init before changing batch size or dimensions.");
         if (!m_lossFunc)
         {
             m_lossFunc = new DirectLoss<T,Mat>();
@@ -807,7 +809,7 @@ class Model
         if (_input && m_inputMatrix)
         {
             m_inputMatrix.get()->SetData(_input->GetData(), _input->GetOffset());
-            m_inputMatrix.get()->SetDims(_input->GetDims());
+            m_inputMatrix.get()->SetShape(_input->GetShape());
         }
 
         // Do forward pass.
@@ -1143,12 +1145,12 @@ class Model
         return it->second;
     }
 
-    void SetExpectedInputDims(const Dims3D& _dims)
+    void SetExpectedInputDims(const MatrixShape& _dims)
     {
         m_expectedInputDims = _dims;
 	}
 
-    Dims3D GetExpectedInputDims() const
+    MatrixShape GetExpectedInputDims() const
     {
         return m_expectedInputDims;
     }
@@ -1175,7 +1177,7 @@ class Model
 	}
 
     MatrixRef   m_inputMatrix;
-	Dims3D      m_expectedInputDims         = Dims3D(0,0);
+	MatrixShape      m_expectedInputDims         = MatrixShape::Matrix(0,0);
     MatrixRef   m_outputErrorMatrix;
     T           m_lastLoss                  = T(0);
 
@@ -1312,7 +1314,7 @@ class Model
         {
             auto& accumulator = m_accumulatedGradients[parameter];
             if (!accumulator)
-                accumulator = manager.AllocateMatrix(gradient->GetDims(), "AccumulatedGradient");
+                accumulator = manager.AllocateMatrix(gradient->GetShape(), "AccumulatedGradient");
             if (m_pendingGradientPasses == 0u)
             {
                 Copy(accumulator.get(), gradient);
@@ -1331,14 +1333,12 @@ class Model
             FlushAccumulatedGradients();
     }
 
-    void EnsureInputMatrix(const Dims3D& dims)
+    void EnsureInputMatrix(const MatrixShape& dims)
     {
         MatrixManager<T, Mat>& inst = MatrixManager<T, Mat>::Instance();
         if (m_inputMatrix)
         {
-            if (m_inputMatrix->GetDimsX() == dims.x
-                && m_inputMatrix->GetDimsY() == dims.y
-                && m_inputMatrix->GetDimsZ() == dims.z)
+            if (m_inputMatrix->GetShape() == dims)
             {
                 return;
             }

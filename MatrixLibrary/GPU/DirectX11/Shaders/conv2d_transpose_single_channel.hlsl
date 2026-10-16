@@ -5,9 +5,9 @@ cbuffer MatOut_Params : register(b0)
     uint out_dimz;
     uint out_offset;
     uint out_uniqueId;
-    uint out_pad0;
-    uint out_pad1;
-    uint out_pad2;
+    uint out_channels;
+    uint out_batch;
+    uint out_reserved;
     uint4 out_optionalParams[4];
 };
 
@@ -18,9 +18,9 @@ cbuffer MatIn_Params : register(b1)
     uint in_dimz;
     uint in_offset;
     uint in_uniqueId;
-    uint in_pad0;
-    uint in_pad1;
-    uint in_pad2;
+    uint in_channels;
+    uint in_batch;
+    uint in_reserved;
 };
 
 cbuffer MatKernel_Params : register(b2)
@@ -30,9 +30,9 @@ cbuffer MatKernel_Params : register(b2)
     uint kernel_dimz;
     uint kernel_offset;
     uint kernel_uniqueId;
-    uint kernel_pad0;
-    uint kernel_pad1;
-    uint kernel_pad2;
+    uint kernel_channels;
+    uint kernel_batch;
+    uint kernel_reserved;
 };
 
 RWStructuredBuffer<float> MatOut : register(u0);
@@ -43,7 +43,7 @@ StructuredBuffer<float> MatKernel : register(t2);
 void CSMain(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
     uint idx = dispatchThreadId.x;
-    uint outCount = out_dimx * out_dimy;
+    uint outCount = out_dimx * out_dimy * out_batch;
     if (idx >= outCount)
         return;
 
@@ -53,13 +53,14 @@ void CSMain(uint3 dispatchThreadId : SV_DispatchThreadID)
     const int padding = int(out_optionalParams[0].w);
 
     const uint x = idx % out_dimx;
-    const uint y = idx / out_dimx;
+    const uint y = (idx / out_dimx) % out_dimy;
+    const uint batch = idx / (out_dimx * out_dimy);
     const uint outPlane = out_dimx * out_dimy;
     const uint inputPlane = in_dimx * in_dimy;
     const uint kernelPlane = kernel_dimx * kernel_dimy;
 
     float sum = 0.0f;
-    for (uint ic = 0u; ic < in_dimz; ++ic)
+    for (uint ic = 0u; ic < in_channels; ++ic)
     {
         for (uint ky = 0u; ky < kernel_dimy; ++ky)
         {
@@ -77,13 +78,13 @@ void CSMain(uint3 dispatchThreadId : SV_DispatchThreadID)
                 if (inX >= in_dimx || inY >= in_dimy)
                     continue;
 
-                const uint inputIdx = in_offset + ic * inputPlane + inY * in_dimx + inX;
+                const uint inputIdx = in_offset + (batch * in_channels + ic) * inputPlane + inY * in_dimx + inX;
                 const uint kernelIdx = kernel_offset + ic * kernelPlane + ky * kernel_dimx + kx;
                 sum += MatIn[inputIdx] * MatKernel[kernelIdx];
             }
         }
     }
 
-    const uint outIdx = out_offset + outputChannel * outPlane + y * out_dimx + x;
+    const uint outIdx = out_offset + (batch * out_channels + outputChannel) * outPlane + y * out_dimx + x;
     MatOut[outIdx] = sum;
 }

@@ -51,9 +51,9 @@ T MeanSquaredErrorLoss(MatrixBase<T>* target, MatrixBase<T>* prediction)
 template<class T>
 void Softmax(MatrixBase<T>* out, MatrixBase<T>* in)
 {
-    assert(out->GetDimsX() == in->GetDimsX() && out->GetDimsY() == in->GetDimsY());
-    const uint32_t rows = in->GetDimsY();
-    const uint32_t cols = in->GetDimsX();
+    assert(out->GetWidth() == in->GetWidth() && out->GetHeight() == in->GetHeight());
+    const uint32_t rows = in->GetHeight() * in->GetPlaneCount();
+    const uint32_t cols = in->GetWidth();
     const T* inPtr = in->DataRead();
     T* outPtr = out->DataWrite();
 
@@ -87,11 +87,11 @@ void SoftmaxBackwards(MatrixBase<T>* out, MatrixBase<T>* softmaxOut, MatrixBase<
     assert(out);
     assert(softmaxOut);
     assert(gradIn);
-    assert(out->GetDimsX() == softmaxOut->GetDimsX() && out->GetDimsY() == softmaxOut->GetDimsY());
-    assert(gradIn->GetDimsX() == softmaxOut->GetDimsX() && gradIn->GetDimsY() == softmaxOut->GetDimsY());
+    assert(out->GetWidth() == softmaxOut->GetWidth() && out->GetHeight() == softmaxOut->GetHeight());
+    assert(gradIn->GetWidth() == softmaxOut->GetWidth() && gradIn->GetHeight() == softmaxOut->GetHeight());
 
-    const uint32_t rows = softmaxOut->GetDimsY();
-    const uint32_t cols = softmaxOut->GetDimsX();
+    const uint32_t rows = softmaxOut->GetHeight() * softmaxOut->GetPlaneCount();
+    const uint32_t cols = softmaxOut->GetWidth();
     const T* softPtr = softmaxOut->DataRead();
     const T* gradPtr = gradIn->DataRead();
     T* outPtr = out->DataWrite();
@@ -118,14 +118,14 @@ void AttentionScoresBackwards(MatrixBase<T>* out, MatrixBase<T>* probs,
                               MatrixBase<T>* grad, MatrixBase<T>* scale)
 {
     assert(out && probs && grad && scale);
-    assert(out->GetDimsX() == out->GetDimsY());
-    assert(out->GetDimsX() == probs->GetDimsX() && out->GetDimsY() == probs->GetDimsY()
-           && out->GetDimsZ() == probs->GetDimsZ());
-    assert(out->GetDimsX() == grad->GetDimsX() && out->GetDimsY() == grad->GetDimsY()
-           && out->GetDimsZ() == grad->GetDimsZ());
+    assert(out->GetWidth() == out->GetHeight());
+    assert(out->GetWidth() == probs->GetWidth() && out->GetHeight() == probs->GetHeight()
+           && out->GetPlaneCount() == probs->GetPlaneCount());
+    assert(out->GetWidth() == grad->GetWidth() && out->GetHeight() == grad->GetHeight()
+           && out->GetPlaneCount() == grad->GetPlaneCount());
     assert(scale->GetElementCount() == 1u);
-    const uint32_t width = out->GetDimsX();
-    const uint32_t rows = out->GetDimsY() * out->GetDimsZ();
+    const uint32_t width = out->GetWidth();
+    const uint32_t rows = out->GetHeight() * out->GetPlaneCount();
     const T* p = probs->DataRead();
     const T* g = grad->DataRead();
     const T factor = scale->DataRead()[0];
@@ -149,8 +149,8 @@ void TriangleMatrix(MatrixBase<T>* _out, TriangleDirection _dir, T trueVal, T fa
 {
     assert(_out);
 
-    const uint32_t rows = _out->GetDimsY();
-    const uint32_t cols = _out->GetDimsX();
+    const uint32_t rows = _out->GetHeight() * _out->GetPlaneCount();
+    const uint32_t cols = _out->GetWidth();
     const T* inPtr = _out->DataRead();
     T* outPtr = _out->DataWrite();
 
@@ -159,7 +159,7 @@ void TriangleMatrix(MatrixBase<T>* _out, TriangleDirection _dir, T trueVal, T fa
         for (uint32_t row = 0; row < rows; ++row)
         {
             const uint32_t rowOffset = row * cols;
-            const uint32_t keep = row + 1 < cols ? row + 1 : cols;
+            const uint32_t keep = row % _out->GetHeight() + 1 < cols ? row % _out->GetHeight() + 1 : cols;
             for (uint32_t col = 0; col < keep; ++col)
             {
                 outPtr[rowOffset + col] = trueVal;
@@ -175,7 +175,7 @@ void TriangleMatrix(MatrixBase<T>* _out, TriangleDirection _dir, T trueVal, T fa
     for (uint32_t row = 0; row < rows; ++row)
     {
         const uint32_t rowOffset = row * cols;
-        const uint32_t start = row < cols ? row : cols;
+        const uint32_t start = row % _out->GetHeight() < cols ? row % _out->GetHeight() : cols;
         for (uint32_t col = 0; col < start; ++col)
         {
             outPtr[rowOffset + col] = falseVal;
@@ -214,17 +214,37 @@ void CopyRange(MatrixBase<T>* _out,
                 sizeof(T) * count);
 }
 
+template<class Mat>
+void Concat(Mat* out,Mat* left,Mat* right,MatrixAxis axis)
+{
+    if(!out || !left || !right || out->GetShape()!=left->GetShape().Concatenated(right->GetShape(),axis))
+        throw std::invalid_argument("Concatenation output shape is incorrect.");
+    uint32_t leftChunk=left->GetWidth(),rightChunk=right->GetWidth();
+    uint32_t outer=left->GetHeight()*left->GetPlaneCount();
+    if(axis!=MatrixAxis::Width) {
+        leftChunk*=left->GetHeight();rightChunk*=right->GetHeight();outer=left->GetPlaneCount();
+        if(axis!=MatrixAxis::Height) {
+            leftChunk*=left->GetChannelCount();rightChunk*=right->GetChannelCount();outer=left->GetBatchCount();
+            if(axis==MatrixAxis::Batch) {leftChunk*=left->GetBatchCount();rightChunk*=right->GetBatchCount();outer=1u;}
+        }
+    }
+    for(uint32_t index=0;index<outer;++index) {
+        CopyRange(out,left,index*(leftChunk+rightChunk),index*leftChunk,leftChunk);
+        CopyRange(out,right,index*(leftChunk+rightChunk)+leftChunk,index*rightChunk,rightChunk);
+    }
+}
+
 template<class T>
 void ConcatZ(MatrixBase<T>* _out, MatrixBase<T>* _A, MatrixBase<T>* _B)
 {
     assert(_out);
     assert(_A);
     assert(_B);
-    assert(_A->GetDimsX() == _B->GetDimsX());
-    assert(_A->GetDimsY() == _B->GetDimsY());
-    assert(_out->GetDimsX() == _A->GetDimsX());
-    assert(_out->GetDimsY() == _A->GetDimsY());
-    assert(_out->GetDimsZ() == _A->GetDimsZ() + _B->GetDimsZ());
+    assert(_A->GetWidth() == _B->GetWidth());
+    assert(_A->GetHeight() == _B->GetHeight());
+    assert(_out->GetWidth() == _A->GetWidth());
+    assert(_out->GetHeight() == _A->GetHeight());
+    assert(_out->GetPlaneCount() == _A->GetPlaneCount() + _B->GetPlaneCount());
 
     const uint32_t countA = _A->GetElementCount();
     const uint32_t countB = _B->GetElementCount();
@@ -239,17 +259,17 @@ void GatherRows(MatrixBase<T>* _out, MatrixBase<T>* _src, MatrixBase<T>* _indice
     assert(_out);
     assert(_src);
     assert(_indices);
-    assert(_indices->GetDimsX() == 1u);
+    assert(_indices->GetWidth() == 1u);
 
-    const uint32_t rowWidth = _src->GetDimsX();
-    const uint32_t outRows = _out->GetDimsY();
-    const uint32_t outBatch = _out->GetDimsZ();
-    const uint32_t srcRows = _src->GetDimsY();
-    const uint32_t srcBatch = _src->GetDimsZ();
+    const uint32_t rowWidth = _src->GetWidth();
+    const uint32_t outRows = _out->GetHeight();
+    const uint32_t outBatch = _out->GetPlaneCount();
+    const uint32_t srcRows = _src->GetHeight();
+    const uint32_t srcBatch = _src->GetPlaneCount();
 
-    assert(_out->GetDimsX() == rowWidth);
-    assert(_indices->GetDimsY() == outRows);
-    assert(_indices->GetDimsZ() == outBatch);
+    assert(_out->GetWidth() == rowWidth);
+    assert(_indices->GetHeight() == outRows);
+    assert(_indices->GetPlaneCount() == outBatch);
     assert(srcBatch == 1u || srcBatch == outBatch);
 
     const uint32_t outPlane = rowWidth * outRows;
@@ -281,17 +301,17 @@ void ScatterRows(MatrixBase<T>* _out, MatrixBase<T>* _src, MatrixBase<T>* _indic
     assert(_out);
     assert(_src);
     assert(_indices);
-    assert(_indices->GetDimsX() == 1u);
-    assert(_src->GetDimsX() == _out->GetDimsX());
-    assert(_src->GetDimsY() == _indices->GetDimsY());
-    assert(_src->GetDimsZ() == _indices->GetDimsZ());
-    assert(_out->GetDimsZ() == 1u || _out->GetDimsZ() == _src->GetDimsZ());
+    assert(_indices->GetWidth() == 1u);
+    assert(_src->GetWidth() == _out->GetWidth());
+    assert(_src->GetHeight() == _indices->GetHeight());
+    assert(_src->GetPlaneCount() == _indices->GetPlaneCount());
+    assert(_out->GetPlaneCount() == 1u || _out->GetPlaneCount() == _src->GetPlaneCount());
 
-    const uint32_t rowWidth = _src->GetDimsX();
-    const uint32_t srcRows = _src->GetDimsY();
-    const uint32_t srcBatch = _src->GetDimsZ();
-    const uint32_t outRows = _out->GetDimsY();
-    const uint32_t outBatch = _out->GetDimsZ();
+    const uint32_t rowWidth = _src->GetWidth();
+    const uint32_t srcRows = _src->GetHeight();
+    const uint32_t srcBatch = _src->GetPlaneCount();
+    const uint32_t outRows = _out->GetHeight();
+    const uint32_t outBatch = _out->GetPlaneCount();
 
     const uint32_t srcPlane = rowWidth * srcRows;
     const uint32_t outPlane = rowWidth * outRows;
@@ -322,17 +342,17 @@ void ScatterAddRows(MatrixBase<T>* _out, MatrixBase<T>* _src, MatrixBase<T>* _in
     assert(_out);
     assert(_src);
     assert(_indices);
-    assert(_indices->GetDimsX() == 1u);
-    assert(_src->GetDimsX() == _out->GetDimsX());
-    assert(_src->GetDimsY() == _indices->GetDimsY());
-    assert(_src->GetDimsZ() == _indices->GetDimsZ());
-    assert(_out->GetDimsZ() == 1u || _out->GetDimsZ() == _src->GetDimsZ());
+    assert(_indices->GetWidth() == 1u);
+    assert(_src->GetWidth() == _out->GetWidth());
+    assert(_src->GetHeight() == _indices->GetHeight());
+    assert(_src->GetPlaneCount() == _indices->GetPlaneCount());
+    assert(_out->GetPlaneCount() == 1u || _out->GetPlaneCount() == _src->GetPlaneCount());
 
-    const uint32_t rowWidth = _src->GetDimsX();
-    const uint32_t srcRows = _src->GetDimsY();
-    const uint32_t srcBatch = _src->GetDimsZ();
-    const uint32_t outRows = _out->GetDimsY();
-    const uint32_t outBatch = _out->GetDimsZ();
+    const uint32_t rowWidth = _src->GetWidth();
+    const uint32_t srcRows = _src->GetHeight();
+    const uint32_t srcBatch = _src->GetPlaneCount();
+    const uint32_t outRows = _out->GetHeight();
+    const uint32_t outBatch = _out->GetPlaneCount();
 
     const uint32_t srcPlane = rowWidth * srcRows;
     const uint32_t outPlane = rowWidth * outRows;
@@ -371,8 +391,8 @@ void SplitQKV(MatrixBase<T>* _q,
     assert(_v);
     assert(_packed);
 
-    const uint32_t dC = _q->GetDimsX();
-    const uint32_t rows = _q->GetDimsY() * _q->GetDimsZ();
+    const uint32_t dC = _q->GetWidth();
+    const uint32_t rows = _q->GetHeight() * _q->GetPlaneCount();
     const uint32_t qCount = _q->GetElementCount();
     if (qCount == 0u)
     {
@@ -382,8 +402,8 @@ void SplitQKV(MatrixBase<T>* _q,
     assert(_k->GetElementCount() == qCount);
     assert(_v->GetElementCount() == qCount);
     assert(_packed->GetElementCount() == qCount * 3u);
-    assert(_packed->GetDimsX() == dC * 3u);
-    assert((_packed->GetDimsY() * _packed->GetDimsZ()) == rows);
+    assert(_packed->GetWidth() == dC * 3u);
+    assert((_packed->GetHeight() * _packed->GetPlaneCount()) == rows);
 
     const uint32_t qkvCols = dC * 3u;
     T* qPtr = _q->DataWrite();
@@ -411,9 +431,9 @@ void MergeQKV(MatrixBase<T>* _packedQKV,
     assert(_kHeads);
     assert(_vHeads);
 
-    const uint32_t headDim = _qHeads->GetDimsX();
-    const uint32_t tokens = _qHeads->GetDimsY();
-    const uint32_t nHead = _qHeads->GetDimsZ();
+    const uint32_t headDim = _qHeads->GetWidth();
+    const uint32_t tokens = _qHeads->GetHeight();
+    const uint32_t nHead = _qHeads->GetChannelCount();
     const uint32_t dC = headDim * nHead;
     const uint32_t qCount = _qHeads->GetElementCount();
     if (qCount == 0u)
@@ -421,18 +441,18 @@ void MergeQKV(MatrixBase<T>* _packedQKV,
         return;
     }
 
-    assert(_kHeads->GetDimsX() == headDim);
-    assert(_kHeads->GetDimsY() == tokens);
-    assert(_kHeads->GetDimsZ() == nHead);
-    assert(_vHeads->GetDimsX() == headDim);
-    assert(_vHeads->GetDimsY() == tokens);
-    assert(_vHeads->GetDimsZ() == nHead);
+    assert(_kHeads->GetWidth() == headDim);
+    assert(_kHeads->GetHeight() == tokens);
+    assert(_kHeads->GetChannelCount() == nHead);
+    assert(_vHeads->GetWidth() == headDim);
+    assert(_vHeads->GetHeight() == tokens);
+    assert(_vHeads->GetChannelCount() == nHead);
     assert(_kHeads->GetElementCount() == qCount);
     assert(_vHeads->GetElementCount() == qCount);
 
-    assert(_packedQKV->GetDimsX() == 3u * dC);
-    assert(_packedQKV->GetDimsY() == tokens);
-    assert(_packedQKV->GetDimsZ() == 1u);
+    assert(_packedQKV->GetWidth() == 3u * dC);
+    assert(_packedQKV->GetHeight() == tokens);
+    assert(_packedQKV->GetChannelCount() == 1u && _packedQKV->GetBatchCount() == _qHeads->GetBatchCount());
     assert(_packedQKV->GetElementCount() == qCount * 3u);
 
     const uint32_t qkvCols = 3u * dC;
@@ -443,13 +463,14 @@ void MergeQKV(MatrixBase<T>* _packedQKV,
     const T* vPtr = _vHeads->DataRead();
     T* packedPtr = _packedQKV->DataWrite();
 
+    for (uint32_t batch = 0; batch < _qHeads->GetBatchCount(); ++batch)
     for (uint32_t row = 0; row < tokens; ++row)
     {
-        const uint32_t rowPackedBase = row * qkvCols;
+        const uint32_t rowPackedBase = (batch * tokens + row) * qkvCols;
         const uint32_t rowHeadOffset = row * headDim;
         for (uint32_t head = 0; head < nHead; ++head)
         {
-            const uint32_t srcOffset = head * headPlane + rowHeadOffset;
+            const uint32_t srcOffset = (batch * nHead + head) * headPlane + rowHeadOffset;
             const uint32_t dstOffset = rowPackedBase + head * headDim;
             std::memcpy(packedPtr + dstOffset,
                         qPtr + srcOffset,
@@ -470,15 +491,15 @@ void TransposeMat(MatrixBase<T>* _out, MatrixBase<T>* _in)
     assert(_out);
     assert(_in);
     assert(_out != _in);
-    assert(_out->GetDimsX() == _in->GetDimsY());
-    assert(_out->GetDimsY() == _in->GetDimsX());
-    assert(_out->GetDimsZ() == _in->GetDimsZ());
+    assert(_out->GetWidth() == _in->GetHeight());
+    assert(_out->GetHeight() == _in->GetWidth());
+    assert(_out->GetPlaneCount() == _in->GetPlaneCount());
 
-    const uint32_t inX = _in->GetDimsX();
-    const uint32_t inY = _in->GetDimsY();
-    const uint32_t inZ = _in->GetDimsZ();
-    const uint32_t outX = _out->GetDimsX();
-    const uint32_t outY = _out->GetDimsY();
+    const uint32_t inX = _in->GetWidth();
+    const uint32_t inY = _in->GetHeight();
+    const uint32_t inZ = _in->GetPlaneCount();
+    const uint32_t outX = _out->GetWidth();
+    const uint32_t outY = _out->GetHeight();
 
     const T* inPtr = _in->DataRead();
     T* outPtr = _out->DataWrite();
@@ -502,8 +523,26 @@ void TransposeMat(MatrixBase<T>* _out, MatrixBase<T>* _in)
 }
 
 template<class T>
+void BroadcastBinary(MatrixBase<T>* out, MatrixBase<T>* left, MatrixBase<T>* right, uint32_t operation)
+{
+    if (!out || !left || !right || operation>2u
+        || out->GetShape()!=left->GetShape().BroadcastWith(right->GetShape()))
+        throw std::invalid_argument("Broadcast operation output shape is incorrect.");
+    const auto& shape=out->GetShape();const auto& l=left->GetShape();const auto& r=right->GetShape();
+    const T* a=left->DataRead();const T* b=right->DataRead();T* result=out->DataWrite();
+    for(uint32_t batch=0;batch<shape.batch;++batch) for(uint32_t c=0;c<shape.channels;++c)
+    for(uint32_t y=0;y<shape.height;++y) for(uint32_t x=0;x<shape.width;++x) {
+        const T lhs=a[l.Index(l.batch==1u?0u:batch,l.channels==1u?0u:c,l.width==1u?0u:x,l.height==1u?0u:y)];
+        const T rhs=b[r.Index(r.batch==1u?0u:batch,r.channels==1u?0u:c,r.width==1u?0u:x,r.height==1u?0u:y)];
+        result[shape.Index(batch,c,x,y)]=operation==0u?lhs+rhs:operation==1u?lhs-rhs:lhs*rhs;
+    }
+}
+
+template<class T>
 void Add(MatrixBase<T>* _out, MatrixBase<T>* _L, MatrixBase<T>* _R)
 {
+    if (_out->GetShape()!=_L->GetShape() || _out->GetShape()!=_R->GetShape())
+    { BroadcastBinary(_out,_L,_R,0u);return; }
     assert(_L->GetElementCount() == _R->GetElementCount());
     for (uint32_t i = 0; i < _R->GetElementCount(); i++)
     {
@@ -528,30 +567,30 @@ void LayerNormOp(MatrixBase<T>* _out,
     if (_invStd)
     {
         assert(_xHat);
-        assert(_invStd->GetDimsX() == 1u);
-        assert(_invStd->GetDimsY() == _in->GetDimsY());
-        assert(_invStd->GetDimsZ() == _in->GetDimsZ());
+        assert(_invStd->GetWidth() == 1u);
+        assert(_invStd->GetHeight() == _in->GetHeight());
+        assert(_invStd->GetPlaneCount() == _in->GetPlaneCount());
     }
 
-    assert(_out->GetDimsX() == _in->GetDimsX());
-    assert(_out->GetDimsY() == _in->GetDimsY());
-    assert(_out->GetDimsZ() == _in->GetDimsZ());
-    assert(_gamma->GetDimsX() == _in->GetDimsX());
-    assert(_gamma->GetElementCount() >= _in->GetDimsX());
+    assert(_out->GetWidth() == _in->GetWidth());
+    assert(_out->GetHeight() == _in->GetHeight());
+    assert(_out->GetPlaneCount() == _in->GetPlaneCount());
+    assert(_gamma->GetWidth() == _in->GetWidth());
+    assert(_gamma->GetElementCount() >= _in->GetWidth());
     if (_beta)
     {
-        assert(_beta->GetDimsX() == _in->GetDimsX());
-        assert(_beta->GetElementCount() >= _in->GetDimsX());
+        assert(_beta->GetWidth() == _in->GetWidth());
+        assert(_beta->GetElementCount() >= _in->GetWidth());
     }
     if (_xHat)
     {
-        assert(_xHat->GetDimsX() == _in->GetDimsX());
-        assert(_xHat->GetDimsY() == _in->GetDimsY());
-        assert(_xHat->GetDimsZ() == _in->GetDimsZ());
+        assert(_xHat->GetWidth() == _in->GetWidth());
+        assert(_xHat->GetHeight() == _in->GetHeight());
+        assert(_xHat->GetPlaneCount() == _in->GetPlaneCount());
     }
 
-    const uint32_t cols = _in->GetDimsX();
-    const uint32_t rows = _in->GetDimsY() * _in->GetDimsZ();
+    const uint32_t cols = _in->GetWidth();
+    const uint32_t rows = _in->GetHeight() * _in->GetPlaneCount();
     const T invCols = static_cast<T>(1) / static_cast<T>(cols);
 
     const T* inPtr = _in->DataRead();
@@ -613,36 +652,36 @@ void LayerNormBackwardsOp(MatrixBase<T>* _dX,
     if (_invStd)
     {
         assert(_xHat);
-        assert(_invStd->GetDimsX() == 1u);
-        assert(_invStd->GetDimsY() == _in->GetDimsY());
-        assert(_invStd->GetDimsZ() == _in->GetDimsZ());
+        assert(_invStd->GetWidth() == 1u);
+        assert(_invStd->GetHeight() == _in->GetHeight());
+        assert(_invStd->GetPlaneCount() == _in->GetPlaneCount());
     }
 
     assert(_dGamma);
-    assert(_dX->GetDimsX() == _in->GetDimsX());
-    assert(_dX->GetDimsY() == _in->GetDimsY());
-    assert(_dX->GetDimsZ() == _in->GetDimsZ());
-    assert(_dY->GetDimsX() == _in->GetDimsX());
-    assert(_dY->GetDimsY() == _in->GetDimsY());
-    assert(_dY->GetDimsZ() == _in->GetDimsZ());
-    assert(_gamma->GetDimsX() == _in->GetDimsX());
-    assert(_gamma->GetElementCount() >= _in->GetDimsX());
-    assert(_dGamma->GetDimsX() == _in->GetDimsX());
-    assert(_dGamma->GetElementCount() >= _in->GetDimsX());
+    assert(_dX->GetWidth() == _in->GetWidth());
+    assert(_dX->GetHeight() == _in->GetHeight());
+    assert(_dX->GetPlaneCount() == _in->GetPlaneCount());
+    assert(_dY->GetWidth() == _in->GetWidth());
+    assert(_dY->GetHeight() == _in->GetHeight());
+    assert(_dY->GetPlaneCount() == _in->GetPlaneCount());
+    assert(_gamma->GetWidth() == _in->GetWidth());
+    assert(_gamma->GetElementCount() >= _in->GetWidth());
+    assert(_dGamma->GetWidth() == _in->GetWidth());
+    assert(_dGamma->GetElementCount() >= _in->GetWidth());
     if (_dBeta)
     {
-        assert(_dBeta->GetDimsX() == _in->GetDimsX());
-        assert(_dBeta->GetElementCount() >= _in->GetDimsX());
+        assert(_dBeta->GetWidth() == _in->GetWidth());
+        assert(_dBeta->GetElementCount() >= _in->GetWidth());
     }
     if (_xHat)
     {
-        assert(_xHat->GetDimsX() == _in->GetDimsX());
-        assert(_xHat->GetDimsY() == _in->GetDimsY());
-        assert(_xHat->GetDimsZ() == _in->GetDimsZ());
+        assert(_xHat->GetWidth() == _in->GetWidth());
+        assert(_xHat->GetHeight() == _in->GetHeight());
+        assert(_xHat->GetPlaneCount() == _in->GetPlaneCount());
     }
 
-    const uint32_t rowsTotal = _in->GetDimsY() * _in->GetDimsZ();
-    const uint32_t cols = _in->GetDimsX();
+    const uint32_t rowsTotal = _in->GetHeight() * _in->GetPlaneCount();
+    const uint32_t cols = _in->GetWidth();
     const T invCols = static_cast<T>(1) / static_cast<T>(cols);
 
     const T* inPtr = (_invStd && _xHat) ? nullptr : _in->DataRead();
@@ -784,6 +823,8 @@ void LayerNormBackwardsOp(MatrixBase<T>* _dX,
 template<class T>
 void Sub(MatrixBase<T>* _out, MatrixBase<T>* _L, MatrixBase<T>* _R)
 {
+    if (_out->GetShape()!=_L->GetShape() || _out->GetShape()!=_R->GetShape())
+    { BroadcastBinary(_out,_L,_R,1u);return; }
     for (uint32_t i = 0; i < _R->GetElementCount(); i++)
     {
         _out->DataWrite()[i] = _L->DataRead()[i] - _R->DataRead()[i];
@@ -792,101 +833,33 @@ void Sub(MatrixBase<T>* _out, MatrixBase<T>* _L, MatrixBase<T>* _R)
 
 template<class T>
 void BroadcastAdd(MatrixBase<T>* _out, MatrixBase<T>* _L, MatrixBase<T>* _R)
-{
-    assert(_L->GetDimsZ() == 1);
-    assert(_R->GetDimsZ() == 1);
-    const uint32_t elemCount = _L->GetElementCount();
-    const uint32_t dimsX = _L->GetDimsX();
-    for (uint32_t i = 0; i < elemCount; ++i)
-    {
-        const uint32_t col = i % dimsX;
-        const T lhs = _L->DataRead()[i];
-        const T rhs = _R->DataRead()[col];
-        _out->DataWrite()[i] = lhs + rhs;
-    }
-}
+{ BroadcastBinary(_out,_L,_R,0u); }
 
 template<class T>
 void BroadcastMul(MatrixBase<T>* _out, MatrixBase<T>* _L, MatrixBase<T>* _R)
-{
-    assert(_L->GetDimsZ() == 1);
-    assert(_R->GetDimsZ() == 1);
-    assert(_R->GetDimsX() == _L->GetDimsX());
-    assert(_R->GetDimsY() == 1);
-    const uint32_t elemCount = _L->GetElementCount();
-    const uint32_t dimsX = _L->GetDimsX();
-    for (uint32_t i = 0; i < elemCount; ++i)
-    {
-        const uint32_t col = i % dimsX;
-        const T lhs = _L->DataRead()[i];
-        const T rhs = _R->DataRead()[col];
-        _out->DataWrite()[i] = lhs * rhs;
-    }
-}
+{ BroadcastBinary(_out,_L,_R,2u); }
 
 template<class T>
 void BroadcastAddRows(MatrixBase<T>* _out, MatrixBase<T>* _L, MatrixBase<T>* _R)
-{
-    assert(_L->GetDimsZ() == 1);
-    assert(_R->GetDimsZ() == 1);
-    assert(_R->GetDimsX() == 1);
-    assert(_R->GetDimsY() == _L->GetDimsY());
-    const uint32_t elemCount = _L->GetElementCount();
-    const uint32_t dimsX = _L->GetDimsX();
-    for (uint32_t i = 0; i < elemCount; ++i)
-    {
-        const uint32_t row = i / dimsX;
-        const T lhs = _L->DataRead()[i];
-        const T rhs = _R->DataRead()[row];
-        _out->DataWrite()[i] = lhs + rhs;
-    }
-}
+{ BroadcastBinary(_out,_L,_R,0u); }
 
 template<class T>
 void BroadcastSubRows(MatrixBase<T>* _out, MatrixBase<T>* _L, MatrixBase<T>* _R)
-{
-    assert(_L->GetDimsZ() == 1);
-    assert(_R->GetDimsZ() == 1);
-    assert(_R->GetDimsX() == 1);
-    assert(_R->GetDimsY() == _L->GetDimsY());
-    const uint32_t elemCount = _L->GetElementCount();
-    const uint32_t dimsX = _L->GetDimsX();
-    for (uint32_t i = 0; i < elemCount; ++i)
-    {
-        const uint32_t row = i / dimsX;
-        const T lhs = _L->DataRead()[i];
-        const T rhs = _R->DataRead()[row];
-        _out->DataWrite()[i] = lhs - rhs;
-    }
-}
+{ BroadcastBinary(_out,_L,_R,1u); }
 
 template<class T>
 void BroadcastMulRows(MatrixBase<T>* _out, MatrixBase<T>* _L, MatrixBase<T>* _R)
-{
-    assert(_L->GetDimsZ() == 1);
-    assert(_R->GetDimsZ() == 1);
-    assert(_R->GetDimsX() == 1);
-    assert(_R->GetDimsY() == _L->GetDimsY());
-    const uint32_t elemCount = _L->GetElementCount();
-    const uint32_t dimsX = _L->GetDimsX();
-    for (uint32_t i = 0; i < elemCount; ++i)
-    {
-        const uint32_t row = i / dimsX;
-        const T lhs = _L->DataRead()[i];
-        const T rhs = _R->DataRead()[row];
-        _out->DataWrite()[i] = lhs * rhs;
-    }
-}
+{ BroadcastBinary(_out,_L,_R,2u); }
 
 template<class T>
 void BroadcastAdd(MatrixBase<T>* _out, MatrixBase<T>* _L, MatrixBase<T>* _R, ThreadPool* _threadPool, uint32_t batchSize = 128)
 {
-    assert(_L->GetDimsZ() == 1);
-    assert(_R->GetDimsZ() == 1);
+    assert(_L->GetPlaneCount() == 1);
+    assert(_R->GetPlaneCount() == 1);
     const uint32_t elemCount = _L->GetElementCount();
     if (elemCount == 0) return;
 
-    const uint32_t dimsX = _L->GetDimsX();
+    const uint32_t dimsX = _L->GetWidth();
 
     T*       outPtr = _out->DataWrite();
     const T* lPtr   = _L->DataRead();
@@ -1105,10 +1078,10 @@ template<class T>
 void GeluBackwards(MatrixBase<T>* out, MatrixBase<T>* input, MatrixBase<T>* grad)
 {
     assert(out && input && grad);
-    assert(out->GetDimsX() == input->GetDimsX() && out->GetDimsY() == input->GetDimsY()
-           && out->GetDimsZ() == input->GetDimsZ());
-    assert(out->GetDimsX() == grad->GetDimsX() && out->GetDimsY() == grad->GetDimsY()
-           && out->GetDimsZ() == grad->GetDimsZ());
+    assert(out->GetWidth() == input->GetWidth() && out->GetHeight() == input->GetHeight()
+           && out->GetPlaneCount() == input->GetPlaneCount());
+    assert(out->GetWidth() == grad->GetWidth() && out->GetHeight() == grad->GetHeight()
+           && out->GetPlaneCount() == grad->GetPlaneCount());
     const T sqrt2 = std::sqrt(static_cast<T>(2));
     const T sqrt2pi = std::sqrt(static_cast<T>(2) * static_cast<T>(3.14159265358979323846));
     const T* xPtr = input->DataRead();
@@ -1126,7 +1099,7 @@ void GeluBackwards(MatrixBase<T>* out, MatrixBase<T>* input, MatrixBase<T>* grad
 template<class T, class U>
 void Scale(MatrixBase<T>* _out, MatrixBase<U>* _in, MatrixBase<U>* _val)
 {
-    assert(_val->GetDimsX() == 1 && _val->GetDimsY() == 1);
+    assert(_val->GetWidth() == 1 && _val->GetHeight() == 1);
 	T scaleval = _val->GetValue(0u, 0u);
     for (uint32_t i = 0; i < _in->GetElementCount(); i++)
     {
@@ -1218,15 +1191,38 @@ void Fill(MatrixBase<T>* _out, MatrixBase<T>* _val)
 }
 
 template<class T>
+void ReduceSum(MatrixBase<T>* out, MatrixBase<T>* input, MatrixAxes axes)
+{
+    if (!out || !input || out->GetShape() != input->GetShape().Reduced(axes))
+        throw std::invalid_argument("ReduceSum output must match the input with reduced axes retained.");
+    const auto& in = input->GetShape();
+    const auto& result = out->GetShape();
+    const uint32_t bits = static_cast<uint32_t>(axes);
+    const T* source = input->DataRead();
+    T* destination = out->DataWrite();
+    for (uint32_t b=0;b<result.batch;++b) for (uint32_t c=0;c<result.channels;++c)
+    for (uint32_t y=0;y<result.height;++y) for (uint32_t x=0;x<result.width;++x)
+    {
+        double sum = 0.0;
+        for (uint32_t rb=0;rb<((bits&1u)?in.batch:1u);++rb)
+        for (uint32_t rc=0;rc<((bits&2u)?in.channels:1u);++rc)
+        for (uint32_t ry=0;ry<((bits&8u)?in.height:1u);++ry)
+        for (uint32_t rx=0;rx<((bits&4u)?in.width:1u);++rx)
+            sum += source[in.Index((bits&1u)?rb:b,(bits&2u)?rc:c,(bits&4u)?rx:x,(bits&8u)?ry:y)];
+        destination[result.Index(b,c,x,y)] = static_cast<T>(sum);
+    }
+}
+
+template<class T>
 void SumColumns(MatrixBase<T>* _out, MatrixBase<T>* _in)
 {
     assert(_out);
     assert(_in);
-    assert(_out->GetDimsX() == _in->GetDimsX());
-    assert(_out->GetDimsY() > 0);
+    assert(_out->GetWidth() == _in->GetWidth());
+    assert(_out->GetHeight() > 0);
 
-    const uint32_t dimsX = _in->GetDimsX();
-    const uint32_t dimsY = _in->GetDimsY();
+    const uint32_t dimsX = _in->GetWidth();
+    const uint32_t dimsY = _in->GetHeight();
     const T* inPtr = _in->DataRead();
 
     for (uint32_t col = 0; col < dimsX; ++col)
@@ -1245,13 +1241,13 @@ void SumRows(MatrixBase<T>* _out, MatrixBase<T>* _in)
 {
     assert(_out);
     assert(_in);
-    assert(_out->GetDimsX() == 1);
-    assert(_out->GetDimsY() == _in->GetDimsY());
-    assert(_out->GetDimsZ() == 1);
-    assert(_in->GetDimsZ() == 1);
+    assert(_out->GetWidth() == 1);
+    assert(_out->GetHeight() == _in->GetHeight());
+    assert(_out->GetPlaneCount() == 1);
+    assert(_in->GetPlaneCount() == 1);
 
-    const uint32_t rows = _in->GetDimsY();
-    const uint32_t cols = _in->GetDimsX();
+    const uint32_t rows = _in->GetHeight();
+    const uint32_t cols = _in->GetWidth();
     const T* inPtr = _in->DataRead();
 
     for (uint32_t row = 0; row < rows; ++row)
@@ -1270,16 +1266,14 @@ template<class T>
 void SumSpatialDimension(MatrixBase<T>* _out,
                          MatrixBase<T>* _in,
                          uint32_t _zLayer,
-                         const Dims3D& _outCoord)
+                         const MatrixCoordinate& _outCoord)
 {
     assert(_out);
     assert(_in);
-    assert(_zLayer < _in->GetDimsZ());
-    assert(_outCoord.x < _out->GetDimsX());
-    assert(_outCoord.y < _out->GetDimsY());
-    assert(_outCoord.z < _out->GetDimsZ());
+    assert(_zLayer < _in->GetPlaneCount());
+    const auto destination=_out->GetShape().Index(_outCoord.batch,_outCoord.channel,_outCoord.x,_outCoord.y);
 
-    const uint32_t spatialCount = _in->GetDimsX() * _in->GetDimsY();
+    const uint32_t spatialCount = _in->GetWidth() * _in->GetHeight();
     const T* inPtr = _in->DataRead();
     const uint32_t offset = _zLayer * spatialCount;
     T sum = T(0);
@@ -1287,7 +1281,7 @@ void SumSpatialDimension(MatrixBase<T>* _out,
     {
         sum += inPtr[offset + i];
     }
-    _out->SetValue(_outCoord.x, _outCoord.y, _outCoord.z, sum);
+    _out->DataWrite()[destination]=sum;
 }
 
 template< class T>
@@ -1316,10 +1310,10 @@ T Minimum(MatrixBase<T>*_in)
 template<class T>
 void VConcat(MatrixBase<T>* _out, MatrixBase<T>* _L, MatrixBase<T>* _R )
 {
-    assert(_L->GetDimsZ() == 1);
-    assert(_R->GetDimsZ() == 1);
-    assert(_L->GetDimsX() == _R->GetDimsX());
-    assert(_L->GetDimsY() + _R->GetDimsY() <= _out->GetDimsY());
+    assert(_L->GetPlaneCount() == 1);
+    assert(_R->GetPlaneCount() == 1);
+    assert(_L->GetWidth() == _R->GetWidth());
+    assert(_L->GetHeight() + _R->GetHeight() <= _out->GetHeight());
 
     memcpy(_out->DataWrite(), _L->DataRead(), sizeof(T) * _L->GetElementCount());
     memcpy(_out->DataWrite() + _L->GetElementCount(), _R->DataRead(), sizeof(T) * _R->GetElementCount());
@@ -1332,8 +1326,8 @@ void VConcat(MatrixBase<T>* _out, std::vector<MatrixBase<T>*>& _mats )
     for(uint32_t i = 0; i < _mats.size(); i++)
     {
         MatrixBase<T>* mat = _mats[i];
-        assert(mat->GetDimsZ() == 1);
-        assert(_out->GetDimsX() == mat->GetDimsX());
+        assert(mat->GetPlaneCount() == 1);
+        assert(_out->GetWidth() == mat->GetWidth());
 
         memcpy(_out->DataWrite() + offset, mat->DataRead(), sizeof(T) * mat->GetElementCount());
         offset+=mat->GetElementCount();
@@ -1347,8 +1341,8 @@ void VConcat(MatrixBase<T>* _out, const std::vector<Mat*>& _mats )
     for(uint32_t i = 0; i < _mats.size(); i++)
     {
         MatrixBase<T>* mat = static_cast<MatrixBase<T>*>(_mats[i]);
-        assert(mat->GetDimsZ() == 1);
-        assert(_out->GetDimsX() == mat->GetDimsX());
+        assert(mat->GetPlaneCount() == 1);
+        assert(_out->GetWidth() == mat->GetWidth());
 
         memcpy(_out->DataWrite() + offset, mat->DataRead(), sizeof(T) * mat->GetElementCount());
         offset+=mat->GetElementCount();
@@ -1358,15 +1352,15 @@ void VConcat(MatrixBase<T>* _out, const std::vector<Mat*>& _mats )
 template<class T>
 void HConcat(MatrixBase<T>* _out, MatrixBase<T>* _L, MatrixBase<T>* _R )
 {
-    assert(_L->GetDimsZ() == 1);
-    assert(_R->GetDimsZ() == 1);
-    assert(_L->GetDimsY() == _R->GetDimsY());
-    assert(_L->GetDimsX() + _R->GetDimsX() <= _out->GetDimsX());
+    assert(_L->GetPlaneCount() == 1);
+    assert(_R->GetPlaneCount() == 1);
+    assert(_L->GetHeight() == _R->GetHeight());
+    assert(_L->GetWidth() + _R->GetWidth() <= _out->GetWidth());
 
-    const uint32_t rows = _L->GetDimsY();
-    const uint32_t colsL = _L->GetDimsX();
-    const uint32_t colsR = _R->GetDimsX();
-    const uint32_t outCols = _out->GetDimsX();
+    const uint32_t rows = _L->GetHeight();
+    const uint32_t colsL = _L->GetWidth();
+    const uint32_t colsR = _R->GetWidth();
+    const uint32_t outCols = _out->GetWidth();
 
     T* outPtr = _out->DataWrite();
     const T* lPtr = _L->DataRead();
@@ -1386,236 +1380,93 @@ void HConcat(MatrixBase<T>* _out, MatrixBase<T>* _L, MatrixBase<T>* _R )
 }
 
 template<class T>
-void Conv2DSingleChannel(MatrixBase<T>* output,
-                         MatrixBase<T>* input,
-                         MatrixBase<T>* kernelWeights,
-                         MatrixBase<T>* bias,
-                         uint32_t outputChannel,
-                         uint32_t stride,
-                         uint32_t dilation,
-                         uint32_t padding)
+void ValidateConvolution(MatrixBase<T>* output, MatrixBase<T>* input, MatrixBase<T>* kernel,
+                         uint32_t channel,uint32_t stride,uint32_t dilation)
 {
-    assert(output);
-    assert(input);
-    assert(kernelWeights);
-    assert(outputChannel < output->GetDimsZ());
+    if(!output || !input || !kernel || !stride || !dilation || channel>=output->GetChannelCount()
+        || output->GetBatchCount()!=input->GetBatchCount() || kernel->GetBatchCount()!=1u
+        || kernel->GetChannelCount()!=input->GetChannelCount())
+        throw std::invalid_argument("Invalid convolution shapes or sampling parameters.");
+}
 
-    // Loop Kernel over the input and write to output.
-    for(uint32_t y = 0; y < output->GetDimsY(); y++)
-    {
-        for(uint32_t x = 0; x < output->GetDimsX(); x++)
-        {
-            // Loop over kernel
-            T sum = T(0);
-            for(uint32_t kz = 0; kz < kernelWeights->GetDimsZ(); kz++)
-            {
-                for(uint32_t ky = 0; ky < kernelWeights->GetDimsY(); ky++)
-                {
-                    for(uint32_t kx = 0; kx < kernelWeights->GetDimsX(); kx++)
-                    {
-                        // Handle Stride and dilation.
-                        const int32_t inX = static_cast<int32_t>(x * stride + kx * dilation)
-                                            - static_cast<int32_t>(padding);
-                        const int32_t inY = static_cast<int32_t>(y * stride + ky * dilation)
-                                            - static_cast<int32_t>(padding);
-                        // Handing padding. If we are outsize of the range - assuming 0 added.
-                        if (inX >= 0 && inY >= 0
-                            && inX < static_cast<int32_t>(input->GetDimsX())
-                            && inY < static_cast<int32_t>(input->GetDimsY()))
-                        {
-                            sum += kernelWeights->GetValue(kx, ky, kz)
-                                * input->GetValue(static_cast<uint32_t>(inX),
-                                                    static_cast<uint32_t>(inY),
-                                                    kz);
-                        }
-                    }
-                }
-            }
+inline int64_t ConvolutionInputCoordinate(uint32_t output,uint32_t kernel,uint32_t stride,
+                                         uint32_t dilation,uint32_t padding,bool transposed)
+{
+    const int64_t coordinate=transposed ? int64_t(output)+padding-int64_t(kernel)*dilation
+                                      : int64_t(output)*stride+int64_t(kernel)*dilation-padding;
+    if(transposed && (coordinate<0 || coordinate%stride)) return -1;
+    return transposed ? coordinate/stride : coordinate;
+}
 
-            if(bias) sum += bias->GetValue(outputChannel, 0);
-            output->SetValue(x, y, outputChannel, sum);
+template<class T>
+void ConvolutionForward(MatrixBase<T>* output,MatrixBase<T>* input,MatrixBase<T>* kernel,
+                        MatrixBase<T>* bias,uint32_t channel,uint32_t stride,uint32_t dilation,
+                        uint32_t padding,bool transposed)
+{
+    ValidateConvolution(output,input,kernel,channel,stride,dilation);
+    const auto& o=output->GetShape();const auto& i=input->GetShape();const auto& k=kernel->GetShape();
+    const T* values=input->DataRead();const T* weights=kernel->DataRead();
+    const T biasValue=bias ? bias->DataRead()[channel] : T(0);T* result=output->DataWrite();
+    for(uint32_t b=0;b<o.batch;++b) for(uint32_t y=0;y<o.height;++y) for(uint32_t x=0;x<o.width;++x) {
+        T sum=biasValue;
+        for(uint32_t c=0;c<i.channels;++c) for(uint32_t ky=0;ky<k.height;++ky) for(uint32_t kx=0;kx<k.width;++kx) {
+            const int64_t ix=ConvolutionInputCoordinate(x,kx,stride,dilation,padding,transposed);
+            const int64_t iy=ConvolutionInputCoordinate(y,ky,stride,dilation,padding,transposed);
+            if(ix>=0 && iy>=0 && ix<i.width && iy<i.height)
+                sum+=values[i.Index(b,c,uint32_t(ix),uint32_t(iy))]*weights[k.Index(0,c,kx,ky)];
         }
+        result[o.Index(b,channel,x,y)]=sum;
     }
 }
 
 template<class T>
-void Conv2DSingleChannelBackwards(MatrixBase<T>* errorIn,
-                                  MatrixBase<T>* input,
-                                  MatrixBase<T>* kernel,
-                                  MatrixBase<T>* wUpdate,
-                                  MatrixBase<T>* errorOut,
-                                  uint32_t outputChannel,
-                                  uint32_t stride,
-                                  uint32_t dilation,
-                                  uint32_t padding)
+void ConvolutionBackwards(MatrixBase<T>* error,MatrixBase<T>* input,MatrixBase<T>* kernel,
+                          MatrixBase<T>* weightGradient,MatrixBase<T>* inputGradient,uint32_t channel,
+                          uint32_t stride,uint32_t dilation,uint32_t padding,bool transposed)
 {
-    assert(errorIn);
-    assert(input);
-    assert(kernel);
-    assert(outputChannel < errorIn->GetDimsZ());
-    assert(kernel->GetDimsZ() == input->GetDimsZ());
-
-    const uint32_t inChannels = kernel->GetDimsZ();
-
-    // Calculate Weight and Input Gradients
-    for(uint32_t y = 0; y < errorIn->GetDimsY(); ++y)
-    {
-        for(uint32_t x = 0; x < errorIn->GetDimsX(); ++x)
-        {
-            T grad = errorIn->GetValue(x, y, outputChannel);
-            
-            for(uint32_t kz = 0; kz < inChannels; ++kz)
-            {
-                for(uint32_t ky = 0; ky < kernel->GetDimsY(); ++ky)
-                {
-                    for(uint32_t kx = 0; kx < kernel->GetDimsX(); ++kx)
-                    {
-                        int32_t inX = x * stride + kx * dilation - padding;
-                        int32_t inY = y * stride + ky * dilation - padding;
-
-                        if(inX >= 0 && inY >= 0 && inX < (int32_t)input->GetDimsX() && inY < (int32_t)input->GetDimsY())
-                        {
-                            if(wUpdate)
-                            {
-                                T val = wUpdate->GetValue(kx, ky, kz);
-                                val += input->GetValue(static_cast<uint32_t>(inX), static_cast<uint32_t>(inY), kz) * grad;
-                                wUpdate->SetValue(kx, ky, kz, val);
-                            }
-                            if(errorOut)
-                            {
-                                T val = errorOut->GetValue(static_cast<uint32_t>(inX), static_cast<uint32_t>(inY), kz);
-                                val += kernel->GetValue(kx, ky, kz) * grad;
-                                errorOut->SetValue(static_cast<uint32_t>(inX), static_cast<uint32_t>(inY), kz, val);
-                            }
-                        }
-                    }
-                }
+    ValidateConvolution(error,input,kernel,channel,stride,dilation);
+    if((weightGradient && weightGradient->GetShape()!=kernel->GetShape())
+        || (inputGradient && inputGradient->GetShape()!=input->GetShape()))
+        throw std::invalid_argument("Convolution gradients must match their parameter/input shapes.");
+    const auto& o=error->GetShape();const auto& i=input->GetShape();const auto& k=kernel->GetShape();
+    const T* values=input->DataRead();const T* weights=kernel->DataRead();const T* upstream=error->DataRead();
+    T* dw=weightGradient ? weightGradient->DataWrite() : nullptr;
+    T* dx=inputGradient ? inputGradient->DataWrite() : nullptr;
+    for(uint32_t b=0;b<o.batch;++b) for(uint32_t y=0;y<o.height;++y) for(uint32_t x=0;x<o.width;++x) {
+        const T grad=upstream[o.Index(b,channel,x,y)];
+        for(uint32_t c=0;c<i.channels;++c) for(uint32_t ky=0;ky<k.height;++ky) for(uint32_t kx=0;kx<k.width;++kx) {
+            const int64_t ix=ConvolutionInputCoordinate(x,kx,stride,dilation,padding,transposed);
+            const int64_t iy=ConvolutionInputCoordinate(y,ky,stride,dilation,padding,transposed);
+            if(ix>=0 && iy>=0 && ix<i.width && iy<i.height) {
+                const auto pixel=i.Index(b,c,uint32_t(ix),uint32_t(iy)),weight=k.Index(0,c,kx,ky);
+                if(dw) dw[weight]+=values[pixel]*grad;
+                if(dx) dx[pixel]+=weights[weight]*grad;
             }
         }
     }
 }
 
 template<class T>
-void Conv2DTransposeSingleChannel(MatrixBase<T>* output,
-                                  MatrixBase<T>* input,
-                                  MatrixBase<T>* kernel,
-                                  MatrixBase<T>* bias,
-                                  uint32_t outputChannel,
-                                  uint32_t stride,
-                                  uint32_t dilation,
-                                  uint32_t padding)
-{
-    assert(output);
-    assert(input);
-    assert(kernel);
-    assert(outputChannel < output->GetDimsZ());
-    assert(kernel->GetDimsZ() == input->GetDimsZ());
-
-    const T biasValue = bias ? bias->GetValue(outputChannel, 0u) : static_cast<T>(0);
-    for (uint32_t y = 0; y < output->GetDimsY(); ++y)
-    {
-        for (uint32_t x = 0; x < output->GetDimsX(); ++x)
-        {
-            output->SetValue(x, y, outputChannel, biasValue);
-        }
-    }
-
-    for (uint32_t ic = 0; ic < input->GetDimsZ(); ++ic)
-    {
-        for (uint32_t inY = 0; inY < input->GetDimsY(); ++inY)
-        {
-            for (uint32_t inX = 0; inX < input->GetDimsX(); ++inX)
-            {
-                const T inputValue = input->GetValue(inX, inY, ic);
-                for (uint32_t ky = 0; ky < kernel->GetDimsY(); ++ky)
-                {
-                    for (uint32_t kx = 0; kx < kernel->GetDimsX(); ++kx)
-                    {
-                        const int32_t outX = static_cast<int32_t>(inX * stride + kx * dilation)
-                                           - static_cast<int32_t>(padding);
-                        const int32_t outY = static_cast<int32_t>(inY * stride + ky * dilation)
-                                           - static_cast<int32_t>(padding);
-
-                        if (outX >= 0 && outY >= 0
-                            && outX < static_cast<int32_t>(output->GetDimsX())
-                            && outY < static_cast<int32_t>(output->GetDimsY()))
-                        {
-                            T val = output->GetValue(static_cast<uint32_t>(outX),
-                                                     static_cast<uint32_t>(outY),
-                                                     outputChannel);
-                            val += inputValue * kernel->GetValue(kx, ky, ic);
-                            output->SetValue(static_cast<uint32_t>(outX),
-                                             static_cast<uint32_t>(outY),
-                                             outputChannel,
-                                             val);
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
+void Conv2DSingleChannel(MatrixBase<T>* output,MatrixBase<T>* input,MatrixBase<T>* kernel,MatrixBase<T>* bias,
+                         uint32_t channel,uint32_t stride,uint32_t dilation,uint32_t padding)
+{ ConvolutionForward(output,input,kernel,bias,channel,stride,dilation,padding,false); }
 
 template<class T>
-void Conv2DTransposeSingleChannelBackwards(MatrixBase<T>* errorIn,
-                                           MatrixBase<T>* input,
-                                           MatrixBase<T>* kernel,
-                                           MatrixBase<T>* wUpdate,
-                                           MatrixBase<T>* errorOut,
-                                           uint32_t outputChannel,
-                                           uint32_t stride,
-                                           uint32_t dilation,
-                                           uint32_t padding)
-{
-    assert(errorIn);
-    assert(input);
-    assert(kernel);
-    assert(outputChannel < errorIn->GetDimsZ());
-    assert(kernel->GetDimsZ() == input->GetDimsZ());
+void Conv2DSingleChannelBackwards(MatrixBase<T>* error,MatrixBase<T>* input,MatrixBase<T>* kernel,
+                                  MatrixBase<T>* dw,MatrixBase<T>* dx,uint32_t channel,uint32_t stride,
+                                  uint32_t dilation,uint32_t padding)
+{ ConvolutionBackwards(error,input,kernel,dw,dx,channel,stride,dilation,padding,false); }
 
-    for (uint32_t ic = 0; ic < input->GetDimsZ(); ++ic)
-    {
-        for (uint32_t inY = 0; inY < input->GetDimsY(); ++inY)
-        {
-            for (uint32_t inX = 0; inX < input->GetDimsX(); ++inX)
-            {
-                const T inputValue = input->GetValue(inX, inY, ic);
-                for (uint32_t ky = 0; ky < kernel->GetDimsY(); ++ky)
-                {
-                    for (uint32_t kx = 0; kx < kernel->GetDimsX(); ++kx)
-                    {
-                        const int32_t outX = static_cast<int32_t>(inX * stride + kx * dilation)
-                                           - static_cast<int32_t>(padding);
-                        const int32_t outY = static_cast<int32_t>(inY * stride + ky * dilation)
-                                           - static_cast<int32_t>(padding);
-                        if (outX < 0 || outY < 0
-                            || outX >= static_cast<int32_t>(errorIn->GetDimsX())
-                            || outY >= static_cast<int32_t>(errorIn->GetDimsY()))
-                        {
-                            continue;
-                        }
+template<class T>
+void Conv2DTransposeSingleChannel(MatrixBase<T>* output,MatrixBase<T>* input,MatrixBase<T>* kernel,MatrixBase<T>* bias,
+                                  uint32_t channel,uint32_t stride,uint32_t dilation,uint32_t padding)
+{ ConvolutionForward(output,input,kernel,bias,channel,stride,dilation,padding,true); }
 
-                        const T grad = errorIn->GetValue(static_cast<uint32_t>(outX),
-                                                         static_cast<uint32_t>(outY),
-                                                         outputChannel);
-                        if (wUpdate)
-                        {
-                            T val = wUpdate->GetValue(kx, ky, ic);
-                            val += inputValue * grad;
-                            wUpdate->SetValue(kx, ky, ic, val);
-                        }
-                        if (errorOut)
-                        {
-                            T val = errorOut->GetValue(inX, inY, ic);
-                            val += kernel->GetValue(kx, ky, ic) * grad;
-                            errorOut->SetValue(inX, inY, ic, val);
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
+template<class T>
+void Conv2DTransposeSingleChannelBackwards(MatrixBase<T>* error,MatrixBase<T>* input,MatrixBase<T>* kernel,
+                                           MatrixBase<T>* dw,MatrixBase<T>* dx,uint32_t channel,uint32_t stride,
+                                           uint32_t dilation,uint32_t padding)
+{ ConvolutionBackwards(error,input,kernel,dw,dx,channel,stride,dilation,padding,true); }
 
 template<class T>
 void AdamWUpdate(MatrixBase<T>* param,

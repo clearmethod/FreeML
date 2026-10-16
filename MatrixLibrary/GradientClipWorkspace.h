@@ -28,10 +28,10 @@ struct GradientClipWorkspace
             throw std::length_error("Too many gradient reduction partials.");
         if (count == 0) return 0;
         auto& manager = MatrixManager<T,Mat>::Instance();
-        if (!partials || partials->GetDimsY() < count)
-            partials = manager.AllocateMatrix({2u,uint32_t(count),1u},"GradientNormPartials");
+        if (!partials || partials->GetHeight() < count)
+            partials = manager.AllocateMatrix(MatrixShape::Matrix(2u,uint32_t(count)),"GradientNormPartials");
         if (!scale)
-            scale = manager.AllocateMatrix({1u,1u,1u},"GradientClipScale");
+            scale = manager.AllocateMatrix(MatrixShape::Matrix(1u,1u),"GradientClipScale");
         return uint32_t(count);
     }
 

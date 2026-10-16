@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <memory>
 
+
+
 #if defined(_MSC_VER)
 #define T_RESTRICT __restrict
 #elif defined(__GNUC__) || defined(__clang__)
@@ -26,6 +28,25 @@ inline const T* AssumeAligned64IfPossible(const T* ptr)
 // Transpose mode
 enum class TransposeMode { None, Left, Right, Both };
 
+template<TransposeMode Mode, class T>
+void ValidateMatMulShapes(MatrixBase<T>* out, MatrixBase<T>* left, MatrixBase<T>* right)
+{
+    if (!out || !left || !right) throw std::invalid_argument("Matrix products require three matrices.");
+    constexpr bool tl=Mode==TransposeMode::Left || Mode==TransposeMode::Both;
+    constexpr bool tr=Mode==TransposeMode::Right || Mode==TransposeMode::Both;
+    const uint32_t rows=tl?left->GetWidth():left->GetHeight();
+    const uint32_t inner=tl?left->GetHeight():left->GetWidth();
+    const uint32_t columns=tr?right->GetHeight():right->GetWidth();
+    auto extent=[](uint32_t a,uint32_t b) {
+        if(a!=b && a!=1u && b!=1u) throw std::invalid_argument("Matrix product planes cannot broadcast.");
+        return std::max(a,b);
+    };
+    if(inner!=(tr?right->GetWidth():right->GetHeight())
+        || out->GetShape()!=MatrixShape::Image(extent(left->GetBatchCount(),right->GetBatchCount()),
+            extent(left->GetChannelCount(),right->GetChannelCount()),columns,rows))
+        throw std::invalid_argument("Matrix product output shape is incorrect.");
+}
+
 // Naive direct single thread mul
 // Lots of dynamic allocation getting rows and columns - very slow.
 // Good for debugging issues if needed...
@@ -38,24 +59,24 @@ void MulNoDynamicAlloc(MatrixBase<T>* out,
                        MatrixBase<T>* L,
                        MatrixBase<T>* R)
 {
-    assert(L->GetDimsZ() == 1);
-    assert(R->GetDimsZ() == 1);
+    assert(L->GetPlaneCount() == 1);
+    assert(R->GetPlaneCount() == 1);
 
     constexpr bool TL = (Mode == TransposeMode::Left) || (Mode == TransposeMode::Both);
     constexpr bool TR = (Mode == TransposeMode::Right) || (Mode == TransposeMode::Both);
 
-    const uint32_t L_rows = L->GetDimsY();
-    const uint32_t L_cols = L->GetDimsX();
-    const uint32_t R_rows = R->GetDimsY();
-    const uint32_t R_cols = R->GetDimsX();
+    const uint32_t L_rows = L->GetHeight();
+    const uint32_t L_cols = L->GetWidth();
+    const uint32_t R_rows = R->GetHeight();
+    const uint32_t R_cols = R->GetWidth();
 
     const uint32_t M = TL ? L_cols : L_rows;
     const uint32_t K = TL ? L_rows : L_cols;
     const uint32_t N = TR ? R_rows : R_cols;
 
     assert(K == (TR ? R_cols : R_rows));
-    assert(out->GetDimsY() == M);
-    assert(out->GetDimsX() == N);
+    assert(out->GetHeight() == M);
+    assert(out->GetWidth() == N);
 
     const T* T_RESTRICT A = AssumeAligned64IfPossible(L->DataRead());
     const T* T_RESTRICT B = AssumeAligned64IfPossible(R->DataRead());
@@ -154,24 +175,24 @@ void MulStrided(MatrixBase<T>* out,
                 uint32_t outRowStride,
                 uint32_t outColStride)
 {
-    assert(L->GetDimsZ() == 1);
-    assert(R->GetDimsZ() == 1);
+    assert(L->GetPlaneCount() == 1);
+    assert(R->GetPlaneCount() == 1);
 
     constexpr bool TL = (Mode == TransposeMode::Left) || (Mode == TransposeMode::Both);
     constexpr bool TR = (Mode == TransposeMode::Right) || (Mode == TransposeMode::Both);
 
-    const uint32_t L_rows = L->GetDimsY();
-    const uint32_t L_cols = L->GetDimsX();
-    const uint32_t R_rows = R->GetDimsY();
-    const uint32_t R_cols = R->GetDimsX();
+    const uint32_t L_rows = L->GetHeight();
+    const uint32_t L_cols = L->GetWidth();
+    const uint32_t R_rows = R->GetHeight();
+    const uint32_t R_cols = R->GetWidth();
 
     const uint32_t M = TL ? L_cols : L_rows;
     const uint32_t K = TL ? L_rows : L_cols;
     const uint32_t N = TR ? R_rows : R_cols;
 
     assert(K == (TR ? R_cols : R_rows));
-    assert(out->GetDimsY() == M);
-    assert(out->GetDimsX() == N);
+    assert(out->GetHeight() == M);
+    assert(out->GetWidth() == N);
 
     const T* A = L->DataRead();
     const T* B = R->DataRead();
@@ -285,24 +306,24 @@ void MulStridedBlock(MatrixBase<T>* out,
                      uint32_t numThreads,
                      ThreadPool* pool = nullptr)
 {
-    assert(L->GetDimsZ() == 1);
-    assert(R->GetDimsZ() == 1);
+    assert(L->GetPlaneCount() == 1);
+    assert(R->GetPlaneCount() == 1);
 
     constexpr bool TL = (Mode == TransposeMode::Left) || (Mode == TransposeMode::Both);
     constexpr bool TR = (Mode == TransposeMode::Right) || (Mode == TransposeMode::Both);
 
-    const uint32_t L_rows = L->GetDimsY();
-    const uint32_t L_cols = L->GetDimsX();
-    const uint32_t R_rows = R->GetDimsY();
-    const uint32_t R_cols = R->GetDimsX();
+    const uint32_t L_rows = L->GetHeight();
+    const uint32_t L_cols = L->GetWidth();
+    const uint32_t R_rows = R->GetHeight();
+    const uint32_t R_cols = R->GetWidth();
 
     const uint32_t M = TL ? L_cols : L_rows;
     const uint32_t K = TL ? L_rows : L_cols;
     const uint32_t N = TR ? R_rows : R_cols;
 
     assert(K == (TR ? R_cols : R_rows));
-    assert(out->GetDimsY() == M);
-    assert(out->GetDimsX() == N);
+    assert(out->GetHeight() == M);
+    assert(out->GetWidth() == N);
 
     const T* A = L->DataRead();
     const T* B = R->DataRead();
@@ -408,26 +429,26 @@ void MulStridedBlock(MatrixBase<T>* out,
 template<TransposeMode Mode = TransposeMode::None, class T>
 void MulBlock(MatrixBase<T>* _out, MatrixBase<T>* _L, MatrixBase<T>* _R, uint32_t blockSize)
 {
-    assert(_L->GetDimsZ() == 1);
-    assert(_R->GetDimsZ() == 1);
+    assert(_L->GetPlaneCount() == 1);
+    assert(_R->GetPlaneCount() == 1);
 
     Clear(_out);
 
     constexpr bool TL = (Mode == TransposeMode::Left) || (Mode == TransposeMode::Both);
     constexpr bool TR = (Mode == TransposeMode::Right) || (Mode == TransposeMode::Both);
 
-    const uint32_t L_rows = _L->GetDimsY();
-    const uint32_t L_cols = _L->GetDimsX();
-    const uint32_t R_rows = _R->GetDimsY();
-    const uint32_t R_cols = _R->GetDimsX();
+    const uint32_t L_rows = _L->GetHeight();
+    const uint32_t L_cols = _L->GetWidth();
+    const uint32_t R_rows = _R->GetHeight();
+    const uint32_t R_cols = _R->GetWidth();
 
     const uint32_t M = TL ? L_cols : L_rows;
     const uint32_t K = TL ? L_rows : L_cols;
     const uint32_t N = TR ? R_rows : R_cols;
 
     assert(K == (TR ? R_cols : R_rows));
-    assert(_out->GetDimsY() == M);
-    assert(_out->GetDimsX() == N);
+    assert(_out->GetHeight() == M);
+    assert(_out->GetWidth() == N);
 
     const T* T_RESTRICT A = AssumeAligned64IfPossible(_L->DataRead());
     const T* T_RESTRICT B = AssumeAligned64IfPossible(_R->DataRead());
@@ -478,25 +499,25 @@ template<TransposeMode Mode = TransposeMode::None, class T>
 void MulBlock(MatrixBase<T>* _out,  MatrixBase<T>* _L,  MatrixBase<T>* _R,
                       uint32_t blockSize, uint32_t numThreads, ThreadPool* pool = nullptr)
 {
-    assert(_L->GetDimsZ() == 1);
-    assert(_R->GetDimsZ() == 1);
+    assert(_L->GetPlaneCount() == 1);
+    assert(_R->GetPlaneCount() == 1);
     Clear(_out);
 
     constexpr bool TL = (Mode == TransposeMode::Left) || (Mode == TransposeMode::Both);
     constexpr bool TR = (Mode == TransposeMode::Right) || (Mode == TransposeMode::Both);
 
-    const uint32_t L_rows = _L->GetDimsY();
-    const uint32_t L_cols = _L->GetDimsX();
-    const uint32_t R_rows = _R->GetDimsY();
-    const uint32_t R_cols = _R->GetDimsX();
+    const uint32_t L_rows = _L->GetHeight();
+    const uint32_t L_cols = _L->GetWidth();
+    const uint32_t R_rows = _R->GetHeight();
+    const uint32_t R_cols = _R->GetWidth();
 
     const uint32_t M = TL ? L_cols : L_rows;
     const uint32_t K = TL ? L_rows : L_cols;
     const uint32_t N = TR ? R_rows : R_cols;
 
     assert(K == (TR ? R_cols : R_rows));
-    assert(_out->GetDimsY() == M);
-    assert(_out->GetDimsX() == N);
+    assert(_out->GetHeight() == M);
+    assert(_out->GetWidth() == N);
 
     const T* T_RESTRICT A = AssumeAligned64IfPossible(_L->DataRead());
     const T* T_RESTRICT B = AssumeAligned64IfPossible(_R->DataRead());
@@ -588,31 +609,7 @@ void MulBlock(MatrixBase<T>* _out,  MatrixBase<T>* _L,  MatrixBase<T>* _R,
     }
 }
 
-template<TransposeMode Mode = TransposeMode::None, class T>
-void Mul(MatrixBase<T>* _out, MatrixBase<T>* _L, MatrixBase<T>* _R,
-                      uint32_t blockSize = 32, uint32_t numThreads = 12, ThreadPool* pool = nullptr)
-{
-    if(!pool)
-    {
-        pool = GetGlobalThreadPool();
-		numThreads = pool ? pool->GetThreadCount() : 1;
-    }
-    
-    assert(_L->GetDimsZ() == 1);
-    assert(_R->GetDimsZ() == 1);
-    if(  _L->GetDimsX() > 32 || _R->GetDimsX() > 32
-      || _L->GetDimsY() > 32 || _R->GetDimsY() > 32)
-    {
-        if(pool)
-            MulBlock<Mode, T>(_out, _L, _R, blockSize, numThreads, pool);
-        else
-            MulBlock<Mode, T>(_out, _L, _R, blockSize);
-    }
-    else
-    {
-        MulNoDynamicAlloc<Mode, T>(_out, _L, _R);
-    }
-}
+
 
 template<TransposeMode Mode = TransposeMode::None, class T>
 void MatMul_Strided(MatrixBase<T>* _out,
@@ -627,6 +624,9 @@ void MatMul_Strided(MatrixBase<T>* _out,
                     uint32_t blockSize = 32,
                     uint32_t numThreads = 12,
                     ThreadPool* pool = nullptr,
+                    uint32_t L_channelStride = UINT32_MAX,
+                    uint32_t R_channelStride = UINT32_MAX,
+                    uint32_t outChannelStride = UINT32_MAX,
                     uint32_t L_batchStride = UINT32_MAX,
                     uint32_t R_batchStride = UINT32_MAX,
                     uint32_t outBatchStride = UINT32_MAX)
@@ -637,18 +637,17 @@ void MatMul_Strided(MatrixBase<T>* _out,
         numThreads = pool ? pool->GetThreadCount() : 1;
     }
 
-    assert(_L->GetDimsZ() == _R->GetDimsZ());
-    assert(_out->GetDimsZ() == _L->GetDimsZ());
+    ValidateMatMulShapes<Mode>(_out,_L,_R);
 
-    const uint32_t L_rows = _L->GetDimsY();
-    const uint32_t L_cols = _L->GetDimsX();
-    const uint32_t R_rows = _R->GetDimsY();
-    const uint32_t R_cols = _R->GetDimsX();
-    const uint32_t outRows = _out->GetDimsY();
-    const uint32_t batchCount = _L->GetDimsZ();
+    const uint32_t L_rows = _L->GetHeight();
+    const uint32_t L_cols = _L->GetWidth();
+    const uint32_t R_rows = _R->GetHeight();
+    const uint32_t R_cols = _R->GetWidth();
+    const uint32_t outRows = _out->GetHeight();
+    const uint32_t batchCount = _out->GetPlaneCount();
 
-    const bool useBlock = (_L->GetDimsX() > 32 || _R->GetDimsX() > 32
-                        || _L->GetDimsY() > 32 || _R->GetDimsY() > 32);
+    const bool useBlock = (_L->GetWidth() > 32 || _R->GetWidth() > 32
+                        || _L->GetHeight() > 32 || _R->GetHeight() > 32);
 
     const T* A = _L->DataRead();
     const T* B = _R->DataRead();
@@ -678,15 +677,22 @@ void MatMul_Strided(MatrixBase<T>* _out,
         return;
     }
 
-    const uint32_t L_planeStride = L_batchStride == UINT32_MAX ? L_rowStride * L_rows : L_batchStride;
-    const uint32_t R_planeStride = R_batchStride == UINT32_MAX ? R_rowStride * R_rows : R_batchStride;
-    const uint32_t outPlaneStride = outBatchStride == UINT32_MAX ? outRowStride * outRows : outBatchStride;
+    const uint32_t L_planeStride = L_channelStride == UINT32_MAX ? L_rowStride * L_rows : L_channelStride;
+    const uint32_t R_planeStride = R_channelStride == UINT32_MAX ? R_rowStride * R_rows : R_channelStride;
+    const uint32_t outPlaneStride = outChannelStride == UINT32_MAX ? outRowStride * outRows : outChannelStride;
+
+    const uint32_t L_batch = L_batchStride == UINT32_MAX ? L_planeStride * _L->GetChannelCount() : L_batchStride;
+    const uint32_t R_batch = R_batchStride == UINT32_MAX ? R_planeStride * _R->GetChannelCount() : R_batchStride;
+    const uint32_t outBatch = outBatchStride == UINT32_MAX ? outPlaneStride * _out->GetChannelCount() : outBatchStride;
 
     auto batchWorker = [&](uint32_t z)
     {
-        const T* Ab = A + z * L_planeStride;
-        const T* Bb = B + z * R_planeStride;
-        T* Cb = C + z * outPlaneStride;
+        const uint32_t batch=z/_out->GetChannelCount(),channel=z%_out->GetChannelCount();
+        const T* Ab = A + (_L->GetBatchCount()==1u?0u:batch)*L_batch
+            + (_L->GetChannelCount()==1u?0u:channel)*L_planeStride;
+        const T* Bb = B + (_R->GetBatchCount()==1u?0u:batch)*R_batch
+            + (_R->GetChannelCount()==1u?0u:channel)*R_planeStride;
+        T* Cb = C + batch*outBatch + channel*outPlaneStride;
 
         if (useBlock)
         {
@@ -724,13 +730,46 @@ void MatMul_Strided(MatrixBase<T>* _out,
     }
 }
 
+template<TransposeMode Mode = TransposeMode::None, class T>
+void Mul(MatrixBase<T>* _out, MatrixBase<T>* _L, MatrixBase<T>* _R,
+                      uint32_t blockSize = 32, uint32_t numThreads = 12, ThreadPool* pool = nullptr)
+{
+    ValidateMatMulShapes<Mode>(_out,_L,_R);
+    if(_out->GetPlaneCount()>1u || _L->GetPlaneCount()>1u || _R->GetPlaneCount()>1u) {
+        MatMul_Strided<Mode>(_out,_L,_R,_L->GetWidth(),1u,_R->GetWidth(),1u,
+            _out->GetWidth(),1u,blockSize,numThreads,pool);
+        return;
+    }
+
+    if(!pool)
+    {
+        pool = GetGlobalThreadPool();
+		numThreads = pool ? pool->GetThreadCount() : 1;
+    }
+    assert(_L->GetPlaneCount() == 1);
+    assert(_R->GetPlaneCount() == 1);
+    if(  _L->GetWidth() > 32 || _R->GetWidth() > 32
+      || _L->GetHeight() > 32 || _R->GetHeight() > 32)
+    {
+        if(pool)
+            MulBlock<Mode, T>(_out, _L, _R, blockSize, numThreads, pool);
+        else
+            MulBlock<Mode, T>(_out, _L, _R, blockSize);
+    }
+    else
+    {
+        MulNoDynamicAlloc<Mode, T>(_out, _L, _R);
+    }
+}
+
 
 // Strides are in elements. A zero batch stride broadcasts an input matrix.
 struct MatrixStrides
 {
     uint32_t row;
     uint32_t column;
-    uint32_t batch;
+    uint32_t channel;
+    uint32_t batch = UINT32_MAX;
 };
 
 template<TransposeMode Mode = TransposeMode::None, class Mat>
@@ -739,5 +778,5 @@ void MatMul_Batched(Mat* out, Mat* left, Mat* right,
 {
     MatMul_Strided<Mode>(out, left, right, lhs.row, lhs.column, rhs.row, rhs.column,
                          output.row, output.column, 32u, 12u, nullptr,
-                         lhs.batch, rhs.batch, output.batch);
+                         lhs.channel, rhs.channel, output.channel, lhs.batch, rhs.batch, output.batch);
 }
