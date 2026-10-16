@@ -20,6 +20,6 @@ void CSMain(uint3 dispatchThreadId : SV_DispatchThreadID)
     if (idx >= out_dimx * out_dimy * out_dimz) return;
     float probability = asfloat(out_optionalParams[0].x);
     uint stream = pcg_hash(out_optionalParams[0].y);
-    float uniform = float(pcg_hash(idx ^ stream) >> 8u) * (1.0f / 16777216.0f);
-    MatOut[out_offset + idx] = uniform < probability ? 0.0f : 1.0f;
+    float randomValue = float(pcg_hash(idx ^ stream) >> 8u) * (1.0f / 16777216.0f);
+    MatOut[out_offset + idx] = randomValue < probability ? 0.0f : 1.0f;
 }

@@ -9,9 +9,9 @@ cbuffer InputParams : register(b1) {
 };
 RWStructuredBuffer<float> output : register(u0);
 StructuredBuffer<float> input : register(t0);
-groupshared float shared[256];
+groupshared float partialSums[256];
 [numthreads(256,1,1)]
-void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
+void CSMain(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
 {
     uint index=group.x+group.y*out_optional[0].y;
     if(index>=out_width*out_height*out_planes) return;
@@ -31,10 +31,10 @@ void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
         uint ib=(axes&1u)?position:b;
         sum+=input[input_offset+((ib*input_channels+ic)*input_height+iy)*input_width+ix];
     }
-    shared[lane]=sum;GroupMemoryBarrierWithGroupSync();
+    partialSums[lane]=sum;GroupMemoryBarrierWithGroupSync();
     for(uint stride=128u;stride;stride/=2u) {
-        if(lane<stride) shared[lane]+=shared[lane+stride];
+        if(lane<stride) partialSums[lane]+=partialSums[lane+stride];
         GroupMemoryBarrierWithGroupSync();
     }
-    if(!lane) output[out_offset+index]=shared[0];
+    if(!lane) output[out_offset+index]=partialSums[0];
 }
