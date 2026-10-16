@@ -14,6 +14,8 @@
 #include <OptimiserLibrary/AdamOptimiser.h>
 #include <LossLibrary/Losses.h>
 
+#include <vector>
+
 #ifdef __APPLE__
     #include <MatrixLibrary/GPU/Metal/MetalManager.h>
     #include <MatrixLibrary/GPU/Metal/MatrixMetal.h>
@@ -25,7 +27,7 @@
 #endif
 
 #define T float
-using MatType = MatrixMetal<T>;
+using MatType = MatrixCPU<T>;
 using MatrixRef = typename MatrixManager<T, MatType>::MatrixRef;
 
 int main()

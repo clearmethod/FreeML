@@ -15,7 +15,7 @@ RWStructuredBuffer<float> output : register(u0);
 StructuredBuffer<float> left : register(t0);
 StructuredBuffer<float> right : register(t1);
 [numthreads(256,1,1)]
-void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
+void CSMain(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
 {
     uint index=(group.x+group.y*out_optional[0].y)*256u+lane;
     if(index>=out_width*out_height*out_planes) return;
